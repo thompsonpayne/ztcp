@@ -3,6 +3,9 @@ const net = std.net;
 const posix = std.posix;
 
 pub fn main() !void {
+    const x: u32 = 257;
+    std.debug.print("{any}\n", .{std.mem.asBytes(&x)});
+
     const address = try std.net.Address.parseIp("127.0.0.1", 5882);
 
     const tpe: u32 = posix.SOCK.STREAM;
@@ -46,10 +49,20 @@ pub fn main() !void {
         std.debug.print("{f} connected\n", .{client_address});
 
         const timeout = posix.timeval{ .sec = 2, .usec = 500_000 };
+
+        // set read timeout
         try posix.setsockopt(
             socket,
             posix.SOL.SOCKET,
             posix.SO.RCVTIMEO,
+            &std.mem.toBytes(timeout),
+        );
+
+        // set write timeout
+        try posix.setsockopt(
+            socket,
+            posix.SOL.SOCKET,
+            posix.SO.SNDTIMEO,
             &std.mem.toBytes(timeout),
         );
 
@@ -62,14 +75,14 @@ pub fn main() !void {
             continue;
         }
 
-        write(socket, buf[0..read]) catch |err| {
+        writeAll(socket, buf[0..read]) catch |err| {
             // This can easily happen, say if the client disconnects.
             std.debug.print("error writing: {}\n", .{err});
         };
     }
 }
 
-fn write(socket: posix.socket_t, msg: []const u8) !void {
+fn writeAll(socket: posix.socket_t, msg: []const u8) !void {
     var pos: usize = 0;
     while (pos < msg.len) {
         const written = try posix.write(socket, msg[pos..]);
@@ -78,6 +91,38 @@ fn write(socket: posix.socket_t, msg: []const u8) !void {
         }
         pos += written;
     }
+}
+
+fn writeMessage(socket: posix.socket_t, msg: []const u8) !void {
+    var buf: [4]u8 = undefined;
+    std.mem.writeInt(u32, &buf, @intCast(msg.len), .little);
+    try writeAll(socket, &buf);
+    try writeAll(socket, msg);
+}
+
+fn readAll(socket: posix.socket_t, buf: []u8) !void {
+    var into = buf;
+    while (into.len > 0) {
+        const n = try posix.read(socket, into);
+        if (n == 0) {
+            return error.Closed;
+        }
+        into = into[n..];
+    }
+}
+
+fn readMessage(socket: posix.socket_t, buf: []u8) !void {
+    var header: [4]u8 = undefined;
+    try readAll(socket, &header);
+
+    const len = std.mem.readInt(u32, &header, .little);
+    if (len > buf.len) {
+        return error.BufferTooSmall;
+    }
+
+    const msg = buf[0..len];
+    try readAll(socket, msg);
+    return msg;
 }
 
 fn printAddress(socket: posix.socket_t) !void {
