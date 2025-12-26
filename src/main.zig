@@ -70,17 +70,83 @@ const ThreadPool = struct {
 };
 
 fn handleConnection(connection: net.Server.Connection) void {
-    defer connection.stream.close();
-    std.log.info("At port: {d}\n", .{connection.address.getPort()});
+    // 1. This will print EXACTLY when the socket is closed and by whom.
+    defer {
+        std.log.info("[INFO] Client disconnected: {d}", .{connection.address.getPort()});
+        connection.stream.close();
+    }
 
-    const msg = "HTTP/1.1 200 OK\r\nContent-Length: 13\r\n\r\nHello World!\n";
-    var buf: [4096]u8 = undefined;
-    var writer = connection.stream.writer(&buf);
-    const wInterface = &writer.interface;
-    _ = wInterface.write(msg) catch {};
+    std.log.info("Client connected: {d}", .{connection.address.getPort()});
 
-    // don't forget to flush
-    wInterface.flush() catch {};
+    var read_buf: [4096]u8 = undefined;
+    var net_reader = std.net.Stream.Reader.init(connection.stream, &read_buf);
+    const reader = &net_reader.file_reader.interface;
+
+    var write_buf: [4096]u8 = undefined;
+    var w = connection.stream.writer(&write_buf);
+    var writer = &w.interface;
+
+    while (true) {
+        std.debug.print("\n[WAITING] Waiting for data...\n", .{});
+
+        // READ REQUEST
+        const line_slice = reader.takeDelimiterInclusive('\n') catch |err| {
+            if (err == error.EndOfStream) {
+                std.debug.print("[INFO] Client sent FIN (Disconnect).\n", .{});
+            } else {
+                std.debug.print("[ERROR] Read Error: {}\n", .{err});
+            }
+            break; // Breaks the loop -> Triggers defer -> Closes socket
+        };
+
+        const request_line = std.mem.trimRight(u8, line_slice, "\r\n");
+        if (request_line.len == 0) {
+            continue;
+        }
+
+        std.debug.print("[DATA] Request Line: '{s}'\n", .{request_line});
+
+        // CONSUME HEADERS
+        while (true) {
+            const header_slice = reader.takeDelimiterInclusive('\n') catch |err| {
+                std.debug.print("[ERROR] Failed inside headers: {}\n", .{err});
+                return; // Hard exit
+            };
+            const header = std.mem.trimRight(u8, header_slice, "\r\n");
+
+            if (header.len > 0) {
+                std.debug.print("[DEBUG] Interpreting '{s}' as a Header for the previous request\n", .{header});
+            }
+
+            if (header.len == 0) break;
+        }
+
+        // TODO: HTTP parser
+        // Parse "GET / HTTP/1.1"
+        // var it = std.mem.splitScalar(u8, request_line, ' ');
+        // const method = it.first();
+        // const path = it.next() orelse "/";
+
+        // SEND RESPONSE
+        std.debug.print("[LOGIC] Sending Response...\n", .{});
+        const msg =
+            "HTTP/1.1 200 OK\r\n" ++
+            "Content-Length: 12\r\n" ++
+            "Connection: keep-alive\r\n" ++
+            "\r\n" ++
+            "Hello World!";
+
+        writer.writeAll(msg) catch |err| {
+            std.debug.print("[ERROR] Write Failed (Client gone?): {}\n", .{err});
+            break;
+        };
+
+        writer.flush() catch |err| {
+            std.log.err("flush error: {}\n", .{err});
+        };
+
+        std.debug.print("[SUCCESS] Response sent.\n", .{});
+    }
 }
 
 pub fn main() !void {
