@@ -4,75 +4,14 @@ const testing = std.testing;
 const net = std.net;
 const PORT = 5882;
 
-const Job = struct {
-    connection: net.Server.Connection,
-};
+pub fn handleConnection(allocator: std.mem.Allocator, connection: net.Server.Connection) void {
+    _handleConnection(allocator, connection) catch |err| {
+        std.debug.print("[ERROR] handle connection: {}\n", .{err});
+        return;
+    };
+}
 
-// "but we've threadpool at home"
-// threadpool at home:
-const ThreadPool = struct {
-    mutex: std.Thread.Mutex,
-    condition: std.Thread.Condition,
-    threads: []std.Thread,
-    is_running: bool,
-    allocator: std.mem.Allocator,
-    queue: std.ArrayList(Job),
-
-    fn init(allocator: std.mem.Allocator, n_threads: u16) !*ThreadPool {
-        const pool = try allocator.create(ThreadPool);
-        pool.mutex = .{};
-        pool.condition = .{};
-        pool.queue = try std.ArrayList(Job).initCapacity(allocator, 128);
-        pool.is_running = true;
-        pool.allocator = allocator;
-
-        pool.threads = try allocator.alloc(std.Thread, n_threads);
-
-        for (0..n_threads) |i| {
-            pool.threads[i] = try std.Thread.spawn(.{}, worker, .{pool});
-        }
-
-        return pool;
-    }
-
-    fn deinit(self: *ThreadPool) void {
-        self.allocator.destroy(self);
-    }
-
-    fn addJob(self: *ThreadPool, conn: net.Server.Connection) !void {
-        self.mutex.lock();
-        defer self.mutex.unlock();
-
-        try self.queue.append(self.allocator, .{ .connection = conn });
-
-        // wake up samurai, we've got a server to burn
-        self.condition.signal();
-    }
-
-    fn worker(self: *ThreadPool) void {
-        while (true) {
-            self.mutex.lock();
-
-            while (self.queue.items.len == 0 and self.is_running) {
-                self.condition.wait(&self.mutex);
-            }
-
-            if (self.is_running and self.queue.items.len == 0) {
-                self.mutex.unlock();
-                return;
-            }
-
-            // pop the job
-            const job = self.queue.orderedRemove(0);
-
-            self.mutex.unlock();
-            //do the work
-            handleConnection(job.connection);
-        }
-    }
-};
-
-fn handleConnection(allocator: std.mem.Allocator, connection: net.Server.Connection) void {
+pub fn _handleConnection(allocator: std.mem.Allocator, connection: net.Server.Connection) !void {
     // NOTE: example of a request
     // POST /login HTTP/1.1\r\n
     // Host: example.com\r\n
@@ -83,11 +22,11 @@ fn handleConnection(allocator: std.mem.Allocator, connection: net.Server.Connect
     // {"user": "admin"}
 
     defer {
-        std.log.info("[INFO] Client disconnected: {d}", .{connection.address.getPort()});
+        std.log.debug("[INFO] Client disconnected: {d}", .{connection.address.getPort()});
         connection.stream.close();
     }
 
-    std.log.info("Client connected: {d}", .{connection.address.getPort()});
+    std.log.debug("Client connected: {d}", .{connection.address.getPort()});
 
     var read_buf: [4096]u8 = undefined;
     // var net_reader = std.net.Stream.Reader.init(connection.stream, &read_buf);
@@ -109,10 +48,7 @@ fn handleConnection(allocator: std.mem.Allocator, connection: net.Server.Connect
         // READ REQUEST
         const line_slice = reader.takeDelimiterInclusive('\n') catch |err| switch (err) {
             // Breaks the loop -> Triggers defer -> Closes socket
-            error.EndOfStream => {
-                std.debug.print("[INFO] Client sent EOS (Disconnect).\n", .{});
-                break;
-            },
+            error.EndOfStream => break,
             else => {
                 std.debug.print("[ERROR] Read Error: {}\n", .{err});
                 break;
@@ -129,18 +65,27 @@ fn handleConnection(allocator: std.mem.Allocator, connection: net.Server.Connect
             std.log.err("[ERROR] process request line with error: {}\n", .{err});
             return;
         };
-        defer allocator.free(request_line_parsed.path);
-        defer allocator.free(request_line_parsed.version);
+        defer {
+            allocator.free(request_line_parsed.path);
+            allocator.free(request_line_parsed.version);
+        }
 
         var content_length: u16 = 0;
         var headers = std.StringHashMap([]const u8).init(allocator); // for storing headers as kv
         defer headers.deinit();
 
-        // CONSUME HEADERS
+        // HEADERS PARSING
         while (true) {
-            const header_slice = reader.takeDelimiterInclusive('\n') catch |err| {
-                std.debug.print("[ERROR] Failed inside headers: {}\n", .{err});
-                return; // Hard exit
+            const header_slice = reader.takeDelimiterInclusive('\n') catch |err| switch (err) {
+                error.StreamTooLong => {
+                    // NOTE: Keep headers small as restriction
+                    std.debug.print("[ERROR] 431 Request header too large: {}\n", .{err});
+                    return;
+                },
+                else => {
+                    std.debug.print("[ERROR] Failed inside headers: {}\n", .{err});
+                    return; // Hard exit
+                },
             };
             const header = std.mem.trimEnd(u8, header_slice, "\r\n");
 
@@ -148,7 +93,7 @@ fn handleConnection(allocator: std.mem.Allocator, connection: net.Server.Connect
                 var iter = std.mem.splitScalar(u8, header, ':');
 
                 const key = iter.first();
-                const value = iter.next() orelse "";
+                const value = iter.rest(); // handle case where value is: "localhost:8080"
                 const trimmed_value = std.mem.trim(u8, value, " ");
                 headers.put(key, trimmed_value) catch |err| {
                     std.log.err("Invalid header {}\n", .{err});
@@ -156,51 +101,66 @@ fn handleConnection(allocator: std.mem.Allocator, connection: net.Server.Connect
                 };
 
                 if (std.ascii.eqlIgnoreCase(key, "content-length")) {
-                    content_length = std.fmt.parseInt(u16, trimmed_value, 10) catch {
-                        std.log.err("Invalid content length: {s}\n", .{trimmed_value});
-                        return;
-                    };
+                    content_length = std.fmt.parseInt(u16, trimmed_value, 10) catch 0;
                 }
             }
 
             if (header.len == 0) break;
         }
 
-        std.debug.print("[DEBUG]  version: {s}\n", .{request_line_parsed.version});
+        var body = try std.ArrayList(u8).initCapacity(allocator, 1024);
 
-        const request = HttpParser.HttpRequest.init(
-            request_line_parsed.method,
-            headers,
-            request_line_parsed.path,
-            request_line_parsed.version,
-            null,
-        ) catch |err| {
-            std.log.err("[ERROR] construct request: {}\n", .{err});
-            return;
-        };
+        if (content_length > 0) {
+            // body = reader.readAlloc(allocator, content_length) catch null;
+            std.debug.print("[debug] Reading {d} bytes of body...\n", .{content_length});
+
+            var total_read: usize = 0;
+            var body_buffer: [4096]u8 = undefined;
+
+            // stream body in chunks to handle large body
+            while (total_read < content_length) {
+                const remaining = content_length - total_read;
+                const to_read = @min(body_buffer.len, remaining);
+                const dest_slice = body_buffer[0..to_read];
+
+                const bytes_read = reader.readSliceShort(dest_slice) catch 0;
+
+                if (bytes_read == 0) {
+                    std.debug.print("[ERROR] Unexpected EOF. Expected {} more bytes.\n", .{remaining});
+                    break;
+                }
+
+                const chunk = dest_slice[0..bytes_read];
+
+                body.appendSlice(allocator, chunk) catch |err| {
+                    std.debug.print("[ERROR] append chunk to body: {}\n", .{err});
+                    return;
+                };
+
+                total_read += bytes_read;
+            }
+        }
+        defer body.deinit(allocator);
+
+        // TODO: handle routes
 
         std.debug.print("[LOGIC] Sending Response...\n", .{});
-        const resp = std.mem.concat(allocator, u8, &[_][]const u8{
-            @tagName(request.method),
-            request.path,
-            request.version,
-        }) catch |err| {
-            std.log.err("[ERROR] constructing response: {}\n", .{err});
-            return;
-        };
-        errdefer allocator.free(resp);
 
-        std.debug.print("[DEBUG] response: {s}\n", .{resp});
+        // Format response
+        const response_body = body.items;
+        try writer.writeAll("HTTP/1.1 200 OK\r\n");
+        try writer.print("Content-Length: {d}\r\n", .{response_body.len});
+        try writer.writeAll("Content-Type: text/plain\r\n");
+        try writer.writeAll("Connection: keep-alive\r\n");
 
-        writer.writeAll(resp) catch |err| {
+        try writer.writeAll("\r\n");
+
+        writer.writeAll(response_body) catch |err| {
             std.debug.print("[ERROR] Write Failed (Client gone?): {}\n", .{err});
             break;
         };
 
-        writer.flush() catch |err| {
-            std.log.err("flush error: {}\n", .{err});
-        };
-
+        try writer.flush();
         std.debug.print("[SUCCESS] Response sent.\n", .{});
     }
 }
@@ -219,7 +179,7 @@ pub fn main() !void {
     try real_pool.init(.{ .allocator = allocator, .n_jobs = 4 });
     defer real_pool.deinit();
 
-    std.debug.print("init with 4 threads\n", .{});
+    std.debug.print("[INFO] init with 4 threads\n", .{});
 
     const address = try std.net.Address.parseIp4("127.0.0.1", PORT);
     var server = try address.listen(.{ .reuse_address = true });
@@ -239,9 +199,9 @@ pub fn main() !void {
 }
 
 const RequestLine = struct {
-    method: HttpParser.HttpMethod,
     path: []const u8,
     version: []const u8,
+    method: HttpParser.HttpMethod,
 };
 
 fn processRequestLine(allocator: std.mem.Allocator, request_line: []const u8) !RequestLine {
@@ -259,7 +219,7 @@ fn processRequestLine(allocator: std.mem.Allocator, request_line: []const u8) !R
     return .{ .method = method, .path = path, .version = version };
 }
 
-test "test read until delimiter" {
+test "read until delimiter" {
     const str: []const u8 = "hello\n";
     var reader = std.Io.Reader.fixed(str);
     const result = try reader.takeDelimiterInclusive('\n');
@@ -268,7 +228,7 @@ test "test read until delimiter" {
     try testing.expectEqualStrings("hello\n", result);
 }
 
-test "trim right" {
+test "trim end" {
     const slice: []const u8 = "hello\r\n";
     const request_line = std.mem.trimEnd(u8, slice, "\r\n");
 
