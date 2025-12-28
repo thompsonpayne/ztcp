@@ -1,5 +1,7 @@
 const std = @import("std");
 const HttpParser = @import("http_parser.zig");
+const HttpRequest = HttpParser.HttpRequest;
+const HttpMethod = HttpParser.HttpMethod;
 const testing = std.testing;
 const net = std.net;
 const PORT = 5882;
@@ -45,6 +47,9 @@ pub fn _handleConnection(allocator: std.mem.Allocator, connection: net.Server.Co
 
         std.debug.print("\n[WAITING] Waiting for data...\n", .{});
 
+        var request = try HttpRequest.init(allocator);
+        defer request.deinit();
+
         // READ REQUEST
         const line_slice = reader.takeDelimiterInclusive('\n') catch |err| switch (err) {
             // Breaks the loop -> Triggers defer -> Closes socket
@@ -61,18 +66,22 @@ pub fn _handleConnection(allocator: std.mem.Allocator, connection: net.Server.Co
         }
 
         // process request line
-        const request_line_parsed = processRequestLine(allocator, request_line) catch |err| {
+        request.processRequestLine(request_line) catch |err| {
             std.log.err("[ERROR] process request line with error: {}\n", .{err});
             return;
         };
         defer {
-            allocator.free(request_line_parsed.path);
-            allocator.free(request_line_parsed.version);
+            allocator.free(request.path);
+        }
+
+        if (request.method == .UNKNOWN) {
+            try writer.writeAll("HTTP/1.1 405 ERROR\r\n");
+            try writer.writeAll("Unknown method\r\n");
+            try writer.flush();
+            continue;
         }
 
         var content_length: u16 = 0;
-        var headers = std.StringHashMap([]const u8).init(allocator); // for storing headers as kv
-        defer headers.deinit();
 
         // HEADERS PARSING
         while (true) {
@@ -95,7 +104,7 @@ pub fn _handleConnection(allocator: std.mem.Allocator, connection: net.Server.Co
                 const key = iter.first();
                 const value = iter.rest(); // handle case where value is: "localhost:8080"
                 const trimmed_value = std.mem.trim(u8, value, " ");
-                headers.put(key, trimmed_value) catch |err| {
+                request.headers.put(key, trimmed_value) catch |err| {
                     std.log.err("Invalid header {}\n", .{err});
                     return;
                 };
@@ -108,7 +117,12 @@ pub fn _handleConnection(allocator: std.mem.Allocator, connection: net.Server.Co
             if (header.len == 0) break;
         }
 
-        var body = try std.ArrayList(u8).initCapacity(allocator, 1024);
+        if (request.isBodyRequired() and content_length == 0) {
+            try writer.writeAll("HTTP/1.1 400 Bad Request\r\n");
+            try writer.writeAll("Empty payload \r\n");
+            try writer.flush();
+            continue;
+        }
 
         if (content_length > 0) {
             // body = reader.readAlloc(allocator, content_length) catch null;
@@ -132,7 +146,7 @@ pub fn _handleConnection(allocator: std.mem.Allocator, connection: net.Server.Co
 
                 const chunk = dest_slice[0..bytes_read];
 
-                body.appendSlice(allocator, chunk) catch |err| {
+                request.body.appendSlice(allocator, chunk) catch |err| {
                     std.debug.print("[ERROR] append chunk to body: {}\n", .{err});
                     return;
                 };
@@ -140,14 +154,13 @@ pub fn _handleConnection(allocator: std.mem.Allocator, connection: net.Server.Co
                 total_read += bytes_read;
             }
         }
-        defer body.deinit(allocator);
 
         // TODO: handle routes
 
         std.debug.print("[LOGIC] Sending Response...\n", .{});
 
         // Format response
-        const response_body = body.items;
+        const response_body = request.body.items;
         try writer.writeAll("HTTP/1.1 200 OK\r\n");
         try writer.print("Content-Length: {d}\r\n", .{response_body.len});
         try writer.writeAll("Content-Type: text/plain\r\n");
@@ -198,27 +211,6 @@ pub fn main() !void {
     }
 }
 
-const RequestLine = struct {
-    path: []const u8,
-    version: []const u8,
-    method: HttpParser.HttpMethod,
-};
-
-fn processRequestLine(allocator: std.mem.Allocator, request_line: []const u8) !RequestLine {
-    var split_iter = std.mem.splitScalar(u8, request_line, ' ');
-    const m = split_iter.first();
-    const method = HttpParser.HttpRequest.parseMethod(m);
-    const p = split_iter.next() orelse "/";
-    const v = split_iter.next() orelse "HTTP/1.1";
-
-    const path = try allocator.dupe(u8, p);
-    errdefer allocator.free(path);
-
-    const version = try allocator.dupe(u8, v);
-
-    return .{ .method = method, .path = path, .version = version };
-}
-
 test "read until delimiter" {
     const str: []const u8 = "hello\n";
     var reader = std.Io.Reader.fixed(str);
@@ -245,13 +237,16 @@ test "trim" {
 test "request line parse" {
     const allocator = testing.allocator;
     const request_line: []const u8 = "POST /login HTTP/1.1";
-    const result = try processRequestLine(allocator, request_line);
+
+    var request = try HttpRequest.init(allocator);
+    defer request.deinit();
+    try request.processRequestLine(request_line);
     defer {
-        allocator.free(result.path);
-        allocator.free(result.version);
+        allocator.free(request.path);
+        allocator.free(request.version);
     }
 
-    try testing.expectEqualStrings("POST", @tagName(result.method));
-    try testing.expectEqualStrings("/login", result.path);
-    try testing.expectEqualStrings("HTTP/1.1", result.version);
+    try testing.expectEqualStrings("POST", @tagName(request.method));
+    try testing.expectEqualStrings("/login", request.path);
+    try testing.expectEqualStrings("HTTP/1.1", request.version.asString());
 }
