@@ -70,14 +70,6 @@ pub const HttpRequest = struct {
         self.*.version = version;
         self.*.path = path;
     }
-
-    pub fn getRoute(self: HttpRequest) Route {
-        var path = self.path;
-        if (std.mem.indexOfScalar(u8, self.path, '?')) |idx| {
-            path = self.path[0..idx];
-        }
-        return routes_map.get(path) orelse .NotFound;
-    }
 };
 
 pub const HttpVersion = enum {
@@ -100,26 +92,7 @@ pub const HttpVersion = enum {
             .Http1_0 => "HTTP/1.0",
             .Http1_1 => "HTTP/1.1",
             .Http2 => "HTTP/2",
+            .Http3 => "HTTP/3",
         };
     }
-};
-
-const Route = enum {
-    Login,
-    Home,
-    Health,
-    NotFound,
-};
-
-pub const routes_map = std.StaticStringMap(Route).initComptime(.{
-    .{ "/login", .Login },
-    .{ "/", .Home },
-    .{ "/health", .Health },
-});
-
-// example of getting route
-// const route = route_map.get("/login") orelse .NotFound;
-
-const RouteHandler = struct {
-    route: Route,
 };
