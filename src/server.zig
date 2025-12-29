@@ -7,279 +7,336 @@ const HttpRequest = HttpParser.HttpRequest;
 const HttpMethod = HttpParser.HttpMethod;
 const HttpVersion = HttpParser.HttpVersion;
 
-pub fn DServer(comptime Routes: type) type {
-    const Options = struct {
-        port: ?u16 = null,
-        n_threads: ?u8 = null,
-        host: ?[]const u8 = null,
-    };
+const Options = struct {
+    port: ?u16 = null,
+    n_threads: ?u8 = null,
+    host: ?[]const u8 = null,
+};
 
-    return struct {
-        const Self = @This();
+pub const DServer = struct {
+    const Self = @This();
 
+    allocator: std.mem.Allocator,
+    pool: std.Thread.Pool = undefined,
+    port: u16,
+    host: []const u8,
+    server: std.net.Server,
+    is_listening: bool = false,
+    routes: std.ArrayList(Route),
+
+    pub const Handler = *const fn (
         allocator: std.mem.Allocator,
-        pool: std.Thread.Pool = undefined,
-        port: u16,
-        host: []const u8,
-        server: std.net.Server,
-        is_listening: bool = false,
-        // routes: std.StringHashMap(Handler),
-        handlers: [@typeInfo(Routes).@"enum".fields.len]Handler,
+        conn: std.net.Server.Connection,
+        req: HttpRequest,
+    ) anyerror!void;
 
-        pub const Handler = *const fn (allocator: std.mem.Allocator) anyerror!void;
+    /// Default port: 3000
+    pub fn init(allocator: std.mem.Allocator, comptime options: Options) !*Self {
+        const self = try allocator.create(Self);
+        errdefer allocator.destroy(self);
 
-        /// Default port: 3000
-        pub fn init(allocator: std.mem.Allocator, comptime options: Options) !*Self {
-            const self = try allocator.create(Self);
-            errdefer allocator.destroy(self);
+        try self.pool.init(.{ .allocator = allocator, .n_jobs = options.n_threads orelse 1 });
 
-            try self.pool.init(.{ .allocator = allocator, .n_jobs = options.n_threads orelse 1 });
+        self.server = undefined;
+        self.allocator = allocator;
+        self.port = options.port orelse 3000;
+        self.host = options.host orelse "127.0.0.1";
+        self.routes = try .initCapacity(allocator, 64);
 
-            self.server = undefined;
-            self.allocator = allocator;
-            self.port = options.port orelse 3000;
-            self.host = options.host orelse "127.0.0.1";
-            @memset(&self.handlers, undefined);
+        return self;
+    }
 
-            return self;
+    pub fn deinit(self: *Self) void {
+        self.pool.deinit();
+        self.routes.deinit(self.allocator);
+
+        if (self.is_listening) {
+            self.server.deinit();
         }
 
-        pub fn deinit(self: *Self) void {
-            self.pool.deinit();
+        self.is_listening = false;
+        self.allocator.destroy(self);
+    }
 
-            if (self.is_listening) {
-                self.server.deinit();
-            }
+    pub fn serve(self: *Self) !void {
+        const address = try std.net.Address.parseIp4(self.host, self.port);
+        self.server = try address.listen(.{ .reuse_address = true });
+        self.is_listening = true;
 
-            self.is_listening = false;
-            self.allocator.destroy(self);
-        }
+        std.log.info("Listening on {s}:{d}", .{ self.host, self.port });
 
-        pub fn serve(self: *Self) !void {
-            const address = try std.net.Address.parseIp4(self.host, self.port);
-            self.server = try address.listen(.{ .reuse_address = true });
-            self.is_listening = true;
+        while (true) {
+            const connection = try self.server.accept();
+            // try pool.addJob(connection);
 
-            std.log.info("Listening on {s}:{d}", .{ self.host, self.port });
-
-            while (true) {
-                const connection = try self.server.accept();
-                // try pool.addJob(connection);
-
-                self.pool.spawn(handleConnection, .{ self, connection }) catch |err| {
-                    std.log.err("[ERROR][Serve] threads handling connection: {}\n", .{err});
-                    connection.stream.close();
-                };
-            }
-        }
-
-        pub fn handleConnection(self: *Self, connection: net.Server.Connection) void {
-            _handleConnection(self, connection) catch |err| {
-                std.debug.print("[ERROR] handle connection: {}\n", .{err});
-                return;
+            self.pool.spawn(handleConnection, .{ self, connection }) catch |err| {
+                std.log.err("[ERROR][Serve] threads handling connection: {}\n", .{err});
+                connection.stream.close();
             };
         }
+    }
 
-        pub fn _handleConnection(self: *Self, connection: net.Server.Connection) !void {
-            const allocator = self.allocator;
-            // NOTE: example of a request
+    pub fn handleConnection(self: *Self, connection: net.Server.Connection) void {
+        _handleConnection(self, connection) catch |err| {
+            std.debug.print("[ERROR] handle connection: {}\n", .{err});
+            return;
+        };
+    }
+
+    pub fn _handleConnection(self: *Self, conn: net.Server.Connection) !void {
+        const allocator = self.allocator;
+        // NOTE: example of a request
+        // POST /login HTTP/1.1\r\n
+        // Host: example.com\r\n
+        // User-Agent: Mozilla/5.0\r\n
+        // Content-Type: application/json\r\n
+        // Content-Length: 18\r\n
+        // \r\n
+        // {"user": "admin"}
+
+        defer {
+            std.log.debug("[INFO] Client disconnected: {d}", .{conn.address.getPort()});
+            conn.stream.close();
+        }
+
+        std.log.debug("Client connected: {d}", .{conn.address.getPort()});
+
+        var read_buf: [4096]u8 = undefined;
+        // var net_reader = std.net.Stream.Reader.init(connection.stream, &read_buf);
+        // const reader = &net_reader.file_reader.interface;
+
+        var s_reader = conn.stream.reader(&read_buf);
+        var reader = &s_reader.file_reader.interface;
+
+        var write_buf: [4096]u8 = undefined;
+        var w = conn.stream.writer(&write_buf);
+        var writer = &w.interface;
+
+        while (true) {
+            // NOTE: request line example
             // POST /login HTTP/1.1\r\n
-            // Host: example.com\r\n
-            // User-Agent: Mozilla/5.0\r\n
-            // Content-Type: application/json\r\n
-            // Content-Length: 18\r\n
-            // \r\n
-            // {"user": "admin"}
 
-            defer {
-                std.log.debug("[INFO] Client disconnected: {d}", .{connection.address.getPort()});
-                connection.stream.close();
+            std.debug.print("\n[WAITING] Waiting for data...\n", .{});
+
+            var request = try HttpRequest.init(allocator);
+            defer request.deinit();
+
+            // READ REQUEST
+            const line_slice = reader.takeDelimiterInclusive('\n') catch |err| switch (err) {
+                // Breaks the loop -> Triggers defer -> Closes socket
+                error.EndOfStream => break,
+                else => {
+                    std.debug.print("[ERROR] Read Error: {}\n", .{err});
+                    break;
+                },
+            };
+
+            const request_line = std.mem.trimEnd(u8, line_slice, "\r\n");
+            if (request_line.len == 0) {
+                continue;
             }
 
-            std.log.debug("Client connected: {d}", .{connection.address.getPort()});
+            // process request line
+            request.processRequestLine(request_line) catch |err| {
+                std.log.err("[ERROR] process request line with error: {}\n", .{err});
+                return;
+            };
+            defer {
+                allocator.free(request.path);
+            }
 
-            var read_buf: [4096]u8 = undefined;
-            // var net_reader = std.net.Stream.Reader.init(connection.stream, &read_buf);
-            // const reader = &net_reader.file_reader.interface;
+            if (request.method == .UNKNOWN) {
+                try writer.writeAll("HTTP/1.1 405 ERROR\r\n");
+                try writer.writeAll("Unknown method\r\n");
+                try writer.flush();
+                continue;
+            }
 
-            var s_reader = connection.stream.reader(&read_buf);
-            var reader = &s_reader.file_reader.interface;
+            var content_length: u16 = 0;
 
-            var write_buf: [4096]u8 = undefined;
-            var w = connection.stream.writer(&write_buf);
-            var writer = &w.interface;
-
+            // HEADERS PARSING
             while (true) {
-                // NOTE: request line example
-                // POST /login HTTP/1.1\r\n
-
-                std.debug.print("\n[WAITING] Waiting for data...\n", .{});
-
-                var request = try HttpRequest.init(allocator);
-                defer request.deinit();
-
-                // READ REQUEST
-                const line_slice = reader.takeDelimiterInclusive('\n') catch |err| switch (err) {
-                    // Breaks the loop -> Triggers defer -> Closes socket
-                    error.EndOfStream => break,
+                const header_slice = reader.takeDelimiterInclusive('\n') catch |err| switch (err) {
+                    error.StreamTooLong => {
+                        // NOTE: Keep headers small as restriction
+                        std.debug.print("[ERROR] 431 Request header too large: {}\n", .{err});
+                        return;
+                    },
                     else => {
-                        std.debug.print("[ERROR] Read Error: {}\n", .{err});
-                        break;
+                        std.debug.print("[ERROR] Failed inside headers: {}\n", .{err});
+                        return; // Hard exit
                     },
                 };
+                const header = std.mem.trimEnd(u8, header_slice, "\r\n");
 
-                const request_line = std.mem.trimEnd(u8, line_slice, "\r\n");
-                if (request_line.len == 0) {
-                    continue;
-                }
+                if (header.len > 0) {
+                    var iter = std.mem.splitScalar(u8, header, ':');
 
-                // process request line
-                request.processRequestLine(request_line) catch |err| {
-                    std.log.err("[ERROR] process request line with error: {}\n", .{err});
-                    return;
-                };
-                defer {
-                    allocator.free(request.path);
-                }
-
-                if (request.method == .UNKNOWN) {
-                    try writer.writeAll("HTTP/1.1 405 ERROR\r\n");
-                    try writer.writeAll("Unknown method\r\n");
-                    try writer.flush();
-                    continue;
-                }
-
-                var content_length: u16 = 0;
-
-                // HEADERS PARSING
-                while (true) {
-                    const header_slice = reader.takeDelimiterInclusive('\n') catch |err| switch (err) {
-                        error.StreamTooLong => {
-                            // NOTE: Keep headers small as restriction
-                            std.debug.print("[ERROR] 431 Request header too large: {}\n", .{err});
-                            return;
-                        },
-                        else => {
-                            std.debug.print("[ERROR] Failed inside headers: {}\n", .{err});
-                            return; // Hard exit
-                        },
+                    const key = iter.first();
+                    const value = iter.rest(); // handle case where value is: "localhost:8080"
+                    const trimmed_value = std.mem.trim(u8, value, " ");
+                    request.headers.put(key, trimmed_value) catch |err| {
+                        std.log.err("Invalid header {}\n", .{err});
+                        return;
                     };
-                    const header = std.mem.trimEnd(u8, header_slice, "\r\n");
 
-                    if (header.len > 0) {
-                        var iter = std.mem.splitScalar(u8, header, ':');
-
-                        const key = iter.first();
-                        const value = iter.rest(); // handle case where value is: "localhost:8080"
-                        const trimmed_value = std.mem.trim(u8, value, " ");
-                        request.headers.put(key, trimmed_value) catch |err| {
-                            std.log.err("Invalid header {}\n", .{err});
-                            return;
-                        };
-
-                        if (std.ascii.eqlIgnoreCase(key, "content-length")) {
-                            content_length = std.fmt.parseInt(u16, trimmed_value, 10) catch 0;
-                        }
+                    if (std.ascii.eqlIgnoreCase(key, "content-length")) {
+                        content_length = std.fmt.parseInt(u16, trimmed_value, 10) catch 0;
                     }
-
-                    if (header.len == 0) break;
                 }
 
-                if (request.isBodyRequired() and content_length == 0) {
-                    try writer.writeAll("HTTP/1.1 400 Bad Request\r\n");
-                    try writer.writeAll("Empty payload \r\n");
-                    try writer.flush();
+                if (header.len == 0) break;
+            }
+
+            if (request.isBodyRequired() and content_length == 0) {
+                try writer.writeAll("HTTP/1.1 400 Bad Request\r\n");
+                try writer.writeAll("Empty payload \r\n");
+                try writer.flush();
+                continue;
+            }
+
+            if (content_length > 0) {
+                // body = reader.readAlloc(allocator, content_length) catch null;
+                std.debug.print("[debug] Reading {d} bytes of body...\n", .{content_length});
+
+                var total_read: usize = 0;
+                var body_buffer: [4096]u8 = undefined;
+
+                // stream body in chunks to handle large body
+                while (total_read < content_length) {
+                    const remaining = content_length - total_read;
+                    const to_read = @min(body_buffer.len, remaining);
+                    const dest_slice = body_buffer[0..to_read];
+
+                    const bytes_read = reader.readSliceShort(dest_slice) catch 0;
+
+                    if (bytes_read == 0) {
+                        std.debug.print("[ERROR] Unexpected EOF. Expected {} more bytes.\n", .{remaining});
+                        break;
+                    }
+
+                    const chunk = dest_slice[0..bytes_read];
+
+                    request.body.appendSlice(allocator, chunk) catch |err| {
+                        std.debug.print("[ERROR] append chunk to body: {}\n", .{err});
+                        return;
+                    };
+
+                    total_read += bytes_read;
+                }
+            }
+
+            // TODO: handle routes
+            for (self.routes.items) |route| {
+                if (request.method != route.method) {
                     continue;
                 }
 
-                if (content_length > 0) {
-                    // body = reader.readAlloc(allocator, content_length) catch null;
-                    std.debug.print("[debug] Reading {d} bytes of body...\n", .{content_length});
+                // pass req.params to be populated if match is found
+                const is_match = matchRoute(
+                    route.pattern,
+                    request.path,
+                    &request.params,
+                ) catch false;
 
-                    var total_read: usize = 0;
-                    var body_buffer: [4096]u8 = undefined;
+                if (is_match) {
+                    // FOUND IT! Run the handler.
+                    route.handler(self.allocator, conn, request) catch |err| {
+                        std.log.err("Handler failed: {}", .{err});
+                    };
 
-                    // stream body in chunks to handle large body
-                    while (total_read < content_length) {
-                        const remaining = content_length - total_read;
-                        const to_read = @min(body_buffer.len, remaining);
-                        const dest_slice = body_buffer[0..to_read];
+                    std.debug.print("[LOGIC] Sending Response...\n", .{});
+                    const response_body = request.body.items;
 
-                        const bytes_read = reader.readSliceShort(dest_slice) catch 0;
+                    // TODO: handle correct content write
+                    try writer.writeAll("HTTP/1.1 200 OK\r\n");
+                    try writer.print("Content-Length: {d}\r\n", .{response_body.len});
+                    try writer.writeAll("Content-Type: text/plain\r\n");
+                    try writer.writeAll("Connection: keep-alive\r\n");
+                    try writer.writeAll("\r\n");
 
-                        if (bytes_read == 0) {
-                            std.debug.print("[ERROR] Unexpected EOF. Expected {} more bytes.\n", .{remaining});
-                            break;
-                        }
+                    writer.writeAll(response_body) catch |err| {
+                        std.debug.print("[ERROR] Write Failed (Client gone?): {}\n", .{err});
+                        break;
+                    };
 
-                        const chunk = dest_slice[0..bytes_read];
+                    try writer.flush();
 
-                        request.body.appendSlice(allocator, chunk) catch |err| {
-                            std.debug.print("[ERROR] append chunk to body: {}\n", .{err});
-                            return;
-                        };
-
-                        total_read += bytes_read;
-                    }
+                    std.debug.print("[SUCCESS] Response sent.\n", .{});
+                    return;
                 }
 
-                // TODO: handle routes
-                // const route = request.getRoute();
-                const clean_path = cleanPath(request.path);
-                if (std.meta.stringToEnum(Routes, request.path)) |path_enum| {
-                    try self.handlers[@intFromEnum(path_enum)](self.allocator);
-                }
-
-                std.debug.print("[LOGIC] Sending Response...\n", .{});
-
-                // Format response
-                const response_body = request.body.items;
-                try writer.writeAll("HTTP/1.1 200 OK\r\n");
-                try writer.print("Content-Length: {d}\r\n", .{response_body.len});
-                try writer.writeAll("Content-Type: text/plain\r\n");
-                try writer.writeAll("Connection: keep-alive\r\n");
-
-                try writer.writeAll("\r\n");
-
-                writer.writeAll(response_body) catch |err| {
-                    std.debug.print("[ERROR] Write Failed (Client gone?): {}\n", .{err});
-                    break;
-                };
-
-                try writer.flush();
-                std.debug.print("[SUCCESS] Response sent.\n", .{});
+                request.params.clearRetainingCapacity();
             }
         }
+    }
 
-        // example of getting route
-        // const route = route_map.get("/login") orelse .NotFound;
+    /// usage: server.get("/users/:id", handleGet);
+    pub fn get(self: *Self, path: []const u8, handler: Handler) !void {
+        try self.routes.append(self.allocator, .{
+            .method = .GET,
+            .pattern = path,
+            .handler = handler,
+        });
+    }
 
-        // fn getRoute(path: []const u8) Route {
-        //     var cleaned_path = path;
-        //     if (std.mem.indexOfScalar(u8, path, '?')) |idx| {
-        //         cleaned_path = path[0..idx];
-        //     }
-        //     return routes_map.get(cleaned_path) orelse .NotFound;
-        // }
+    /// usage: server.post("/users", handlePost);
+    pub fn post(self: *Self, path: []const u8, handler: Handler) !void {
+        try self.routes.append(self.allocator, .{
+            .method = .POST,
+            .pattern = path,
+            .handler = handler,
+        });
+    }
+};
 
-        /// Build route, path is enum of MyRoutes that you init the server with. Eg: DServer(MyRoutes)
-        pub fn route(self: *Self, path: Routes, handler: Handler) *Self {
-            const idx = @intFromEnum(path);
-            self.handlers[idx] = handler;
-            return self;
+const Route = struct {
+    method: HttpMethod,
+    pattern: []const u8,
+    handler: DServer.Handler,
+};
+
+/// Returns true if it matches. Populates req.params if successful.
+///
+/// route_pattern is defined by caller.
+///
+/// request_path comes from reading the request
+fn matchRoute(
+    route_pattern: []const u8,
+    request_path: []const u8,
+    params: *std.StringHashMap([]const u8),
+) !bool {
+    var route_it = std.mem.splitScalar(u8, route_pattern, '/');
+    var req_it = std.mem.splitScalar(u8, request_path, '/');
+
+    while (true) {
+        const route_part = route_it.next();
+        const req_part = req_it.next();
+
+        // if both end at the same time, it's a match
+        if (route_part == null and req_part == null) return true;
+
+        // if lengths mismatch, fail
+        if (route_part == null or req_part == null) return false;
+
+        const r_p = route_part orelse "";
+        const r_q = req_part orelse "";
+
+        // skip empty parts from leading/trailing slashes
+        if (r_p.len == 0 and r_q.len == 0) continue;
+
+        // 1. check for Parameter (starts with ':')
+        if (r_p.len > 0 and r_p[0] == ':') {
+            // it's a match! Capture the value.
+            // key = "id" (from ":id"), value = "123"
+            try params.put(r_p[1..], r_q);
         }
 
-        fn cleanPath(path: []const u8) []const u8 {
-            var p = path;
-            const path_iter = std.mem.splitScalar(u8, path, '?');
-            const base = path_iter.first();
-            const query = path_iter.next() orelse "";
-
-            if (base.len > 0) {
-                const parts = std.mem.tokenizeScalar(u8, base, '/');
-            }
+        // check for Exact String Match
+        else if (!std.mem.eql(u8, r_p, r_q)) {
+            return false;
         }
-    };
+    }
 }
 
 test "read until delimiter" {
@@ -319,17 +376,4 @@ test "request line parse" {
     try testing.expectEqualStrings("POST", @tagName(request.method));
     try testing.expectEqualStrings("/login", request.path);
     try testing.expectEqualStrings("HTTP/1.1", request.version.asString());
-}
-
-test "enum info" {
-    const Route = enum {
-        Login,
-        Home,
-        Health,
-        NotFound,
-    };
-    const t = @typeInfo(Route).@"enum".fields;
-    inline for (t) |value| {
-        std.debug.print("Type enum info: {s}\n", .{value.name});
-    }
 }

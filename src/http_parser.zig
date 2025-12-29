@@ -16,6 +16,7 @@ pub const HttpRequest = struct {
     path: []const u8,
     version: HttpVersion,
     body: std.ArrayList(u8),
+    params: std.StringHashMap([]const u8),
 
     pub fn init(allocator: std.mem.Allocator) !HttpRequest {
         return .{
@@ -25,11 +26,13 @@ pub const HttpRequest = struct {
             .path = "/",
             .version = HttpVersion.Http1_1,
             .body = try std.ArrayList(u8).initCapacity(allocator, 4096),
+            .params = std.StringHashMap([]const u8).init(allocator),
         };
     }
 
     pub fn deinit(self: *HttpRequest) void {
         self.headers.deinit();
+        self.params.deinit();
         self.body.deinit(self.allocator);
     }
 
@@ -50,7 +53,10 @@ pub const HttpRequest = struct {
         return HttpMethod.UNKNOWN;
     }
 
-    /// Process request line. Eg: "// POST /login HTTP/1.1\r\n".
+    /// Process request line.
+    ///
+    /// Eg: "/POST /login HTTP/1.1\r\n".
+    ///
     /// Assign to self.method, self.version, self.path.
     /// self.path needs to be freed by caller
     pub fn processRequestLine(self: *HttpRequest, request_line: []const u8) !void {
@@ -69,6 +75,11 @@ pub const HttpRequest = struct {
         self.*.method = method;
         self.*.version = version;
         self.*.path = path;
+    }
+
+    /// Helper to get param value.
+    pub fn getParam(self: *HttpRequest, key: []const u8) ?[]const u8 {
+        return self.params.get(key);
     }
 };
 
