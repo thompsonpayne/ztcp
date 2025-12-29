@@ -50,22 +50,33 @@ pub const HttpRequest = struct {
         return HttpMethod.UNKNOWN;
     }
 
+    /// Process request line. Eg: "// POST /login HTTP/1.1\r\n".
+    /// Assign to self.method, self.version, self.path.
+    /// self.path needs to be freed by caller
     pub fn processRequestLine(self: *HttpRequest, request_line: []const u8) !void {
         var split_iter = std.mem.splitScalar(u8, request_line, ' ');
 
         const m = split_iter.first();
         const method = HttpRequest.parseMethod(m);
-        const p = split_iter.next() orelse "/";
-        const v = split_iter.next() orelse "HTTP/1.1";
 
+        const p = split_iter.next() orelse "/";
         const path = try self.allocator.dupe(u8, p); // WARN: needs to be freed by caller
         errdefer self.allocator.free(path);
 
+        const v = split_iter.next() orelse "HTTP/1.1";
         const version = try HttpVersion.fromString(v);
 
         self.*.method = method;
         self.*.version = version;
         self.*.path = path;
+    }
+
+    pub fn getRoute(self: HttpRequest) Route {
+        var path = self.path;
+        if (std.mem.indexOfScalar(u8, self.path, '?')) |idx| {
+            path = self.path[0..idx];
+        }
+        return routes_map.get(path) orelse .NotFound;
     }
 };
 
@@ -91,4 +102,24 @@ pub const HttpVersion = enum {
             .Http2 => "HTTP/2",
         };
     }
+};
+
+const Route = enum {
+    Login,
+    Home,
+    Health,
+    NotFound,
+};
+
+pub const routes_map = std.StaticStringMap(Route).initComptime(.{
+    .{ "/login", .Login },
+    .{ "/", .Home },
+    .{ "/health", .Health },
+});
+
+// example of getting route
+// const route = route_map.get("/login") orelse .NotFound;
+
+const RouteHandler = struct {
+    route: Route,
 };
