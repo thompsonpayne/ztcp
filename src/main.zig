@@ -1,12 +1,13 @@
 const std = @import("std");
-const HttpParser = @import("http_parser.zig");
-const server_mod = @import("server.zig");
-const DServer = server_mod.DServer;
+const utils = @import("http_utils.zig");
+const HttpRequest = @import("http_request.zig");
+const HttpResponse = @import("http_response.zig");
+const DServer = @import("server.zig");
 
-const HttpRequest = HttpParser.HttpRequest;
-const HttpMethod = HttpParser.HttpMethod;
+const HttpMethod = utils.HttpMethod;
 const testing = std.testing;
 const net = std.net;
+
 const PORT = 5882;
 
 const Routes = enum {
@@ -48,15 +49,15 @@ pub fn main() !void {
 }
 
 // TODO: implement detail
-pub fn handleGetUser(allocator: std.mem.Allocator, conn: std.net.Server.Connection, req: HttpRequest) !void {
+pub fn handleGetUser(allocator: std.mem.Allocator, req: HttpRequest, res: *HttpResponse) !void {
     _ = allocator;
-    _ = conn;
     _ = req;
+    _ = res;
 }
 
 // TODO: implement detail
-pub fn handleComment(allocator: std.mem.Allocator, conn: std.net.Server.Connection, req: HttpRequest) !void {
+pub fn handleComment(allocator: std.mem.Allocator, req: HttpRequest, res: *HttpResponse) !void {
     _ = allocator;
-    _ = conn;
     _ = req;
+    _ = res;
 }

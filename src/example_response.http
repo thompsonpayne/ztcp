@@ -1,0 +1,8 @@
+HTTP/1.1 200 OK
+Date: Tue, 30 Dec 2025 13:35:00 GMT
+Server: MyCustomServer/1.0
+Content-Type: application/json
+Content-Length: 31
+Connection: keep-alive
+
+{"message": "Login successful"}
