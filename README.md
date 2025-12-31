@@ -4,16 +4,22 @@
 <h1>Todos</h1>
 
 - [x] Setup connection handler
-- [x] Setup DServer struct (HTTP Server)
+- [x] Setup HttpRequest struct
+- [x] Setup HttpResponse struct
+- [x] Implement Server struct (HTTP Server)
+  - [ ] Handle read/write timeout, close connection
+  - [ ] Gracefully shutdown?
 - [x] Parse headers:
   - [x] Parse request line
   - [x] Parse headers
-  - [ ] Parse content body
-- [ ] Format response:
-  - [ ] Append correct headers
-  - [ ] Append correct content
+  - [x] Parse content body
+- [x] Format response:
+  - [x] Append correct headers
+  - [x] Append correct text content (plain text, json)
+  - [ ] Handle MIME tags?
 
 Basic usage:
+
 ```zig
 pub fn main() !void {
     var gpa = std.heap.DebugAllocator(.{}){};
@@ -24,8 +30,9 @@ pub fn main() !void {
     }
 
     const allocator = gpa.allocator();
+
     var server = try DServer.init(allocator, .{
-        .host = "127.0.0.1",
+        .host = HOST,
         .n_threads = 4,
         .port = PORT,
     });
@@ -33,7 +40,11 @@ pub fn main() !void {
 
     std.debug.print("Listening at: {d}\n", .{PORT});
 
-    // TODO: Call add routes here
+    // Register dynamic route
+    try server.get("/users/:id", handleGetUser);
+
+    // Register nested dynamic route
+    try server.get("/posts/:postId/comments/:commentId", handleComment);
 
     server.serve() catch |err| {
         std.debug.print("[ERROR] from server: {}\n", .{err});
