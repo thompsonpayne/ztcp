@@ -26,7 +26,7 @@ routes: std.ArrayList(Route),
 
 pub const Handler = *const fn (
     allocator: std.mem.Allocator,
-    req: HttpRequest,
+    req: *const HttpRequest,
     res: *HttpResponse, // <--- CHANGED,
 ) anyerror!void;
 
@@ -112,7 +112,7 @@ pub fn _handleConnection(self: *Self, conn: net.Server.Connection) !void {
     var w = conn.stream.writer(&write_buf);
     var writer = &w.interface;
 
-    while (true) {
+    blk: while (true) {
         // NOTE: request line example
         // POST /login HTTP/1.1\r\n
 
@@ -246,7 +246,7 @@ pub fn _handleConnection(self: *Self, conn: net.Server.Connection) !void {
 
             if (is_match) {
                 // FOUND IT! Run the handler.
-                route.handler(self.allocator, request, &response) catch |err| {
+                route.handler(self.allocator, &request, &response) catch |err| {
                     std.log.err("Handler failed: {}", .{err});
 
                     // force a 500 response if headers weren't sent yet
@@ -262,7 +262,7 @@ pub fn _handleConnection(self: *Self, conn: net.Server.Connection) !void {
                 }
 
                 std.debug.print("[LOGIC] Sending Response...\n", .{});
-                return;
+                continue :blk;
             }
 
             request.params.clearRetainingCapacity();

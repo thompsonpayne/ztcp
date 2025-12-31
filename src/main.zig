@@ -1,21 +1,11 @@
 const std = @import("std");
-const utils = @import("http_utils.zig");
 const HttpRequest = @import("http_request.zig");
 const HttpResponse = @import("http_response.zig");
 const DServer = @import("server.zig");
-
-const HttpMethod = utils.HttpMethod;
-const testing = std.testing;
-const net = std.net;
+const ResponseBody = HttpResponse.ResponseBody;
 
 const PORT = 5882;
-
-const Routes = enum {
-    Login,
-    Home,
-    Health,
-    NotFound,
-};
+const HOST = "127.0.0.1";
 
 pub fn main() !void {
     var gpa = std.heap.DebugAllocator(.{}){};
@@ -28,7 +18,7 @@ pub fn main() !void {
     const allocator = gpa.allocator();
 
     var server = try DServer.init(allocator, .{
-        .host = "127.0.0.1",
+        .host = HOST,
         .n_threads = 4,
         .port = PORT,
     });
@@ -36,7 +26,6 @@ pub fn main() !void {
 
     std.debug.print("Listening at: {d}\n", .{PORT});
 
-    // TODO: Call add routes here
     // Register dynamic route
     try server.get("/users/:id", handleGetUser);
 
@@ -49,15 +38,24 @@ pub fn main() !void {
 }
 
 // TODO: implement detail
-pub fn handleGetUser(allocator: std.mem.Allocator, req: HttpRequest, res: *HttpResponse) !void {
+pub fn handleGetUser(allocator: std.mem.Allocator, req: *const HttpRequest, res: *HttpResponse) !void {
     _ = allocator;
     _ = req;
-    _ = res;
+    res.status(200);
+
+    const body: ResponseBody([]const u8) = .{
+        .message = "Success getting user",
+        .data = "Freaking bitching",
+    };
+
+    try res.json(body);
 }
 
 // TODO: implement detail
-pub fn handleComment(allocator: std.mem.Allocator, req: HttpRequest, res: *HttpResponse) !void {
+pub fn handleComment(allocator: std.mem.Allocator, req: *const HttpRequest, res: *HttpResponse) !void {
     _ = allocator;
     _ = req;
-    _ = res;
+
+    res.status(200);
+    try res.json("Success comment");
 }
