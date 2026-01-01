@@ -62,10 +62,11 @@ pub fn send(self: *HttpResponse, content: []const u8) !void {
         201 => "Created",
         400 => "Bad Request",
         404 => "Not Found",
+        408 => "Connection Timed Out",
         500 => "Internal Server Error",
         else => "Unknown",
     };
-    try self.writer.print("HTTP1.1/ {d} {s}\r\n", .{ self.status_code, status_text });
+    try self.writer.print("HTTP/1.1 {d} {s}\r\n", .{ self.status_code, status_text });
 
     try self.writer.print("Content-Length: {d}\r\n", .{content.len});
     try self.writer.writeAll("Connection: keep-alive\r\n");
@@ -75,7 +76,7 @@ pub fn send(self: *HttpResponse, content: []const u8) !void {
     }
 
     // done with header
-    try self.writer.writeAll("\r\n\r\n");
+    try self.writer.writeAll("\r\n");
 
     // write body
     try self.writer.writeAll(content);

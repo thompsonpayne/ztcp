@@ -1,12 +1,12 @@
 /// HTTP Server
 const std = @import("std");
+const posix = std.posix;
 const testing = std.testing;
 const net = std.net;
 const HttpRequest = @import("http_request.zig");
 const utils = @import("http_utils.zig");
 const HttpResponse = @import("http_response.zig");
 const HttpMethod = utils.HttpMethod;
-const HttpVersion = utils.HttpVersion;
 
 const Options = struct {
     port: ?u16 = null,
@@ -16,6 +16,7 @@ const Options = struct {
 
 const Self = @This();
 
+timeout_durations_ms: i32,
 allocator: std.mem.Allocator,
 pool: std.Thread.Pool = undefined,
 port: u16,
@@ -26,8 +27,8 @@ routes: std.ArrayList(Route),
 
 pub const Handler = *const fn (
     allocator: std.mem.Allocator,
-    req: *const HttpRequest,
-    res: *HttpResponse, // <--- CHANGED,
+    req: *const HttpRequest, // const here because we don't want caller to modify the request
+    res: *HttpResponse,
 ) anyerror!void;
 
 /// Default port: 3000
@@ -42,6 +43,7 @@ pub fn init(allocator: std.mem.Allocator, comptime options: Options) !*Self {
     self.port = options.port orelse 3000;
     self.host = options.host orelse "127.0.0.1";
     self.routes = try .initCapacity(allocator, 64);
+    self.timeout_durations_ms = 1000;
 
     return self;
 }
@@ -67,7 +69,6 @@ pub fn serve(self: *Self) !void {
 
     while (true) {
         const connection = try self.server.accept();
-        // try pool.addJob(connection);
 
         self.pool.spawn(handleConnection, .{ self, connection }) catch |err| {
             std.log.err("[ERROR][Serve] threads handling connection: {}\n", .{err});
@@ -112,6 +113,7 @@ pub fn _handleConnection(self: *Self, conn: net.Server.Connection) !void {
     var w = conn.stream.writer(&write_buf);
     var writer = &w.interface;
 
+    // TODO: Handle request timeout
     blk: while (true) {
         // NOTE: request line example
         // POST /login HTTP/1.1\r\n
@@ -120,6 +122,17 @@ pub fn _handleConnection(self: *Self, conn: net.Server.Connection) !void {
 
         var request = try HttpRequest.init(allocator);
         defer request.deinit();
+
+        var response = try HttpResponse.init(allocator, writer);
+        defer response.deinit();
+
+        if (reader.seek == reader.end) {
+            waitReadable(conn.stream, self.timeout_durations_ms) catch {
+                response.status(408);
+                try response.send("Connection timed out");
+                break :blk;
+            };
+        }
 
         // READ REQUEST
         const line_slice = reader.takeDelimiterInclusive('\n') catch |err| switch (err) {
@@ -156,6 +169,14 @@ pub fn _handleConnection(self: *Self, conn: net.Server.Connection) !void {
 
         // HEADERS PARSING
         while (true) {
+            if (reader.seek == reader.end) {
+                waitReadable(conn.stream, self.timeout_durations_ms) catch {
+                    response.status(408);
+                    try response.send("Connection timed out");
+                    break :blk;
+                };
+            }
+
             const header_slice = reader.takeDelimiterInclusive('\n') catch |err| switch (err) {
                 error.StreamTooLong => {
                     // NOTE: Keep headers small as restriction
@@ -208,7 +229,15 @@ pub fn _handleConnection(self: *Self, conn: net.Server.Connection) !void {
                 const to_read = @min(body_buffer.len, remaining);
                 const dest_slice = body_buffer[0..to_read];
 
-                const bytes_read = reader.readSliceShort(dest_slice) catch 0;
+                waitReadable(conn.stream, self.timeout_durations_ms) catch {
+                    response.status(408);
+                    try response.send("Connection timed out");
+                    break :blk;
+                };
+
+                const bytes_read = reader.readSliceShort(dest_slice) catch |err| switch (err) {
+                    error.ReadFailed => return,
+                };
 
                 if (bytes_read == 0) {
                     std.debug.print("[ERROR] Unexpected EOF. Expected {} more bytes.\n", .{remaining});
@@ -225,10 +254,6 @@ pub fn _handleConnection(self: *Self, conn: net.Server.Connection) !void {
                 total_read += bytes_read;
             }
         }
-
-        // init http response
-        var response = try HttpResponse.init(allocator, writer);
-        defer response.deinit();
 
         for (self.routes.items) |route| {
             if (request.method != route.method) {
@@ -361,6 +386,23 @@ const Route = struct {
         }
     }
 };
+
+pub fn waitReadable(stream: std.net.Stream, timeout_ms: i32) !void {
+    var fds = [_]posix.pollfd{.{
+        .fd = stream.handle,
+        .revents = 0,
+        .events = posix.POLL.IN,
+    }};
+
+    const n = try posix.poll(&fds, timeout_ms);
+    if (n == 0) {
+        return error.ConnectionTimedOut;
+    }
+
+    // Optional: treat hangup/error as disconnect
+    if ((fds[0].revents & posix.POLL.HUP) != 0) return error.EndOfStream;
+    if ((fds[0].revents & posix.POLL.ERR) != 0) return error.ConnectionResetByPeer;
+}
 
 test "read until delimiter" {
     const str: []const u8 = "hello\n";
