@@ -7,7 +7,7 @@
 - [x] Setup HttpRequest struct
 - [x] Setup HttpResponse struct
 - [x] Implement Server struct (HTTP Server)
-  - [ ] Handle read/write timeout, close connection
+  - [x] Handle connection timedout/idle time
   - [ ] Gracefully shutdown?
 - [x] Parse headers:
   - [x] Parse request line
