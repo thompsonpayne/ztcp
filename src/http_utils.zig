@@ -9,9 +9,9 @@ pub const StatusCode = enum(u16) {
     ConnectionTimedOut = 408,
     RequestHeaderTooLarge = 431,
     InternalServerError = 500,
- 
+
     pub fn toString(self: StatusCode) []const u8 {
-        return switch(self) {
+        return switch (self) {
             .OK => "OK",
             .Created => "Created",
             .BadRequest => "Bad Request",

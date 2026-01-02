@@ -45,7 +45,7 @@ pub fn init(allocator: std.mem.Allocator, comptime options: Options) !*Self {
     self.port = options.port orelse 3000;
     self.host = options.host orelse "127.0.0.1";
     self.routes = try .initCapacity(allocator, 64);
-    self.timeout_durations_ms = 60_000;
+    self.timeout_durations_ms = 60_000; // 60s
 
     return self;
 }
@@ -129,7 +129,7 @@ pub fn _handleConnection(self: *Self, conn: net.Server.Connection) !void {
         defer response.deinit();
 
         if (reader.seek == reader.end) {
-            waitReadable(conn.stream, self.timeout_durations_ms) catch {
+            waitReadableUntil(conn.stream, self.timeout_durations_ms) catch {
                 response.status(StatusCode.ConnectionTimedOut);
                 try response.send("Connection timed out");
                 break :blk;
@@ -172,7 +172,7 @@ pub fn _handleConnection(self: *Self, conn: net.Server.Connection) !void {
         // HEADERS PARSING
         while (true) {
             if (reader.seek == reader.end) {
-                waitReadable(conn.stream, self.timeout_durations_ms) catch {
+                waitReadableUntil(conn.stream, self.timeout_durations_ms) catch {
                     response.status(StatusCode.ConnectionTimedOut);
                     try response.send("Connection timed out");
                     break :blk;
@@ -231,7 +231,7 @@ pub fn _handleConnection(self: *Self, conn: net.Server.Connection) !void {
                 const to_read = @min(body_buffer.len, remaining);
                 const dest_slice = body_buffer[0..to_read];
 
-                waitReadable(conn.stream, self.timeout_durations_ms) catch {
+                waitReadableUntil(conn.stream, self.timeout_durations_ms) catch {
                     response.status(StatusCode.ConnectionTimedOut);
                     try response.send("Connection timed out");
                     break :blk;
@@ -388,6 +388,15 @@ const Route = struct {
         }
     }
 };
+
+pub fn waitReadableUntil(stream: std.net.Stream, deadline_ms: i64) !void {
+    const deadline_actual_time = std.time.milliTimestamp() + deadline_ms;
+    const remaining_deadline = deadline_actual_time - std.time.milliTimestamp();
+    if (remaining_deadline <= 0) return error.ConnectionTimedOut;
+
+    const remaining_i32: i32 = @intCast(@min(remaining_deadline, std.math.maxInt(i32)));
+    try waitReadable(stream, remaining_i32);
+}
 
 pub fn waitReadable(stream: std.net.Stream, timeout_ms: i32) !void {
     var fds = [_]posix.pollfd{.{
