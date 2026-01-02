@@ -72,6 +72,6 @@ pub fn processRequestLine(self: *HttpRequest, request_line: []const u8) !void {
 }
 
 /// Helper to get param value.
-pub fn getParam(self: *HttpRequest, key: []const u8) ?[]const u8 {
+pub fn getParam(self: *const HttpRequest, key: []const u8) ?[]const u8 {
     return self.params.get(key);
 }

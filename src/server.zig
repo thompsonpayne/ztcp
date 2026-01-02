@@ -115,7 +115,6 @@ pub fn _handleConnection(self: *Self, conn: net.Server.Connection) !void {
     var w = conn.stream.writer(&write_buf);
     var writer = &w.interface;
 
-    // TODO: Handle request timeout
     blk: while (true) {
         // NOTE: request line example
         // POST /login HTTP/1.1\r\n

@@ -38,25 +38,28 @@ pub fn main() !void {
     };
 }
 
-// TODO: implement detail
 pub fn handleGetUser(allocator: std.mem.Allocator, req: *const HttpRequest, res: *HttpResponse) !void {
     _ = allocator;
     _ = req;
-    res.status(utils.StatusCode.OK);
 
     const body: ResponseBody([]const u8) = .{
         .message = "Success getting user",
         .data = "User A",
     };
 
+    res.status(utils.StatusCode.OK);
     try res.json(body);
 }
 
-// TODO: implement detail
 pub fn handleComment(allocator: std.mem.Allocator, req: *const HttpRequest, res: *HttpResponse) !void {
-    _ = allocator;
-    _ = req;
+    const postId = req.getParam("postId") orelse "";
+    const commentId = req.getParam("commentId") orelse "";
+
+    var result = try std.ArrayList(u8).initCapacity(allocator, 1024);
+    defer result.deinit(allocator);
+
+    try result.print(allocator, "PostId: {s}, CommentId: {s}", .{ postId, commentId });
 
     res.status(utils.StatusCode.OK);
-    try res.json("Success comment");
+    try res.json(result.items);
 }

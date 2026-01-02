@@ -5,3 +5,12 @@ Content-Type: application/json
 Content-Length: 64
 
 {"message": "This JSON object is exactly sixty-four bytes long"}
+
+
+GET /posts/1/comments/2 HTTP/1.1
+Host: example.com
+User-Agent: Mozilla/5.0
+Content-Type: application/json
+Content-Length: 64
+
+{"message": "This JSON object is exactly sixty-four bytes long"}
