@@ -1,4 +1,5 @@
 /// HTTP Server
+/// TODO: Add support for http2, http3 versions
 const std = @import("std");
 const posix = std.posix;
 const testing = std.testing;
@@ -7,6 +8,7 @@ const HttpRequest = @import("http_request.zig");
 const utils = @import("http_utils.zig");
 const HttpResponse = @import("http_response.zig");
 const HttpMethod = utils.HttpMethod;
+const StatusCode = utils.StatusCode;
 
 const Options = struct {
     port: ?u16 = null,
@@ -18,7 +20,7 @@ const Self = @This();
 
 timeout_durations_ms: i32,
 allocator: std.mem.Allocator,
-pool: std.Thread.Pool = undefined,
+pool: std.Thread.Pool,
 port: u16,
 host: []const u8,
 server: std.net.Server,
@@ -43,7 +45,7 @@ pub fn init(allocator: std.mem.Allocator, comptime options: Options) !*Self {
     self.port = options.port orelse 3000;
     self.host = options.host orelse "127.0.0.1";
     self.routes = try .initCapacity(allocator, 64);
-    self.timeout_durations_ms = 1000;
+    self.timeout_durations_ms = 60_000;
 
     return self;
 }
@@ -128,7 +130,7 @@ pub fn _handleConnection(self: *Self, conn: net.Server.Connection) !void {
 
         if (reader.seek == reader.end) {
             waitReadable(conn.stream, self.timeout_durations_ms) catch {
-                response.status(408);
+                response.status(StatusCode.ConnectionTimedOut);
                 try response.send("Connection timed out");
                 break :blk;
             };
@@ -171,7 +173,7 @@ pub fn _handleConnection(self: *Self, conn: net.Server.Connection) !void {
         while (true) {
             if (reader.seek == reader.end) {
                 waitReadable(conn.stream, self.timeout_durations_ms) catch {
-                    response.status(408);
+                    response.status(StatusCode.ConnectionTimedOut);
                     try response.send("Connection timed out");
                     break :blk;
                 };
@@ -230,7 +232,7 @@ pub fn _handleConnection(self: *Self, conn: net.Server.Connection) !void {
                 const dest_slice = body_buffer[0..to_read];
 
                 waitReadable(conn.stream, self.timeout_durations_ms) catch {
-                    response.status(408);
+                    response.status(StatusCode.ConnectionTimedOut);
                     try response.send("Connection timed out");
                     break :blk;
                 };
@@ -276,7 +278,7 @@ pub fn _handleConnection(self: *Self, conn: net.Server.Connection) !void {
 
                     // force a 500 response if headers weren't sent yet
                     if (!response.headers_sent) {
-                        response.status(500);
+                        response.status(StatusCode.InternalServerError);
                         try response.send("Internal Server Error");
                     }
                 };
@@ -294,7 +296,7 @@ pub fn _handleConnection(self: *Self, conn: net.Server.Connection) !void {
         }
 
         // Handle 404
-        response.status(404);
+        response.status(StatusCode.NotFound);
         try response.send("Not Found");
     }
 }

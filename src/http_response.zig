@@ -1,4 +1,6 @@
 const std = @import("std");
+const utils = @import("http_utils.zig");
+const StatusCode = utils.StatusCode;
 
 const HttpResponse = @This();
 
@@ -12,7 +14,7 @@ pub fn ResponseBody(comptime T: type) type {
 }
 
 allocator: std.mem.Allocator,
-status_code: u16, // TODO: Use enum later
+status_code: StatusCode,
 headers: std.ArrayList(Header),
 headers_sent: bool,
 
@@ -23,7 +25,7 @@ pub fn init(allocator: std.mem.Allocator, writer: *std.Io.Writer) !HttpResponse 
         .allocator = allocator,
         .headers = try std.ArrayList(Header).initCapacity(allocator, 8),
         .headers_sent = false,
-        .status_code = 200,
+        .status_code = .OK,
         .writer = writer,
     };
 }
@@ -33,7 +35,7 @@ pub fn deinit(self: *HttpResponse) void {
 }
 
 /// set status code of response
-pub fn status(self: *HttpResponse, code: u16) void {
+pub fn status(self: *HttpResponse, code: StatusCode) void {
     self.status_code = code;
 }
 
@@ -57,17 +59,9 @@ pub fn json(self: *HttpResponse, body: anytype) !void {
 pub fn send(self: *HttpResponse, content: []const u8) !void {
     if (self.headers_sent) return error.ResponseAlreadySent;
 
-    const status_text = switch (self.status_code) {
-        200 => "OK",
-        201 => "Created",
-        400 => "Bad Request",
-        404 => "Not Found",
-        408 => "Connection Timed Out",
-        500 => "Internal Server Error",
-        else => "Unknown",
-    };
-    try self.writer.print("HTTP/1.1 {d} {s}\r\n", .{ self.status_code, status_text });
+    const status_text = self.status_code.toString();
 
+    try self.writer.print("HTTP/1.1 {d} {s}\r\n", .{ self.status_code, status_text });
     try self.writer.print("Content-Length: {d}\r\n", .{content.len});
     try self.writer.writeAll("Connection: keep-alive\r\n");
 

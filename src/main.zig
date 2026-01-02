@@ -2,6 +2,7 @@ const std = @import("std");
 const HttpRequest = @import("http_request.zig");
 const HttpResponse = @import("http_response.zig");
 const DServer = @import("server.zig");
+const utils = @import("http_utils.zig");
 const ResponseBody = HttpResponse.ResponseBody;
 
 const PORT = 5882;
@@ -41,7 +42,7 @@ pub fn main() !void {
 pub fn handleGetUser(allocator: std.mem.Allocator, req: *const HttpRequest, res: *HttpResponse) !void {
     _ = allocator;
     _ = req;
-    res.status(200);
+    res.status(utils.StatusCode.OK);
 
     const body: ResponseBody([]const u8) = .{
         .message = "Success getting user",
@@ -56,6 +57,6 @@ pub fn handleComment(allocator: std.mem.Allocator, req: *const HttpRequest, res:
     _ = allocator;
     _ = req;
 
-    res.status(200);
+    res.status(utils.StatusCode.OK);
     try res.json("Success comment");
 }

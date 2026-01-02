@@ -1,5 +1,25 @@
 const std = @import("std");
 
+pub const StatusCode = enum(u16) {
+    OK = 200,
+    Created = 201,
+    BadRequest = 400,
+    NotFound = 404,
+    ConnectionTimedOut = 408,
+    InternalServerError = 500,
+
+    pub fn toString(self: StatusCode) []const u8 {
+        return switch(self) {
+            .OK => "OK",
+            .Created => "Created",
+            .BadRequest => "Bad Request",
+            .NotFound => "Not Found",
+            .ConnectionTimedOut => "Connection Timed Out",
+            .InternalServerError => "Internal Server Error",
+        };
+    }
+};
+
 pub const HttpMethod = enum {
     GET,
     POST,
