@@ -5,17 +5,21 @@ pub const StatusCode = enum(u16) {
     Created = 201,
     BadRequest = 400,
     NotFound = 404,
+    UnknownMethod = 405,
     ConnectionTimedOut = 408,
+    RequestHeaderTooLarge = 431,
     InternalServerError = 500,
-
+ 
     pub fn toString(self: StatusCode) []const u8 {
         return switch(self) {
             .OK => "OK",
             .Created => "Created",
             .BadRequest => "Bad Request",
             .NotFound => "Not Found",
+            .UnknownMethod => "Unknown Method",
             .ConnectionTimedOut => "Connection Timed Out",
             .InternalServerError => "Internal Server Error",
+            .RequestHeaderTooLarge => "Request Header Too Large",
         };
     }
 };

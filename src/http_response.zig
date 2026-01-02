@@ -44,6 +44,7 @@ pub fn setHeader(self: *HttpResponse, key: []const u8, value: []const u8) !void 
     try self.headers.append(self.allocator, .{ .key = key, .value = value });
 }
 
+/// Auto set 'Content-Type' as 'application/json', stringify the body (of anytype: structs, number, ...) and write to socket
 pub fn json(self: *HttpResponse, body: anytype) !void {
     try self.setHeader("Content-Type", "application/json");
 

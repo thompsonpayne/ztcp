@@ -46,7 +46,7 @@ pub fn handleGetUser(allocator: std.mem.Allocator, req: *const HttpRequest, res:
 
     const body: ResponseBody([]const u8) = .{
         .message = "Success getting user",
-        .data = "Freaking bitching",
+        .data = "User A",
     };
 
     try res.json(body);
