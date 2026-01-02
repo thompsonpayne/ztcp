@@ -13,13 +13,13 @@ version: HttpVersion,
 body: std.ArrayList(u8),
 params: std.StringHashMap([]const u8),
 
-pub fn init(allocator: std.mem.Allocator) !HttpRequest {
-    var arena = std.heap.ArenaAllocator.init(allocator);
-    const alloc = arena.allocator();
+pub fn init(a: std.mem.Allocator) !HttpRequest {
+    var arena = std.heap.ArenaAllocator.init(a);
+    const allocator = arena.allocator();
 
     return .{
-        .arena = std.heap.ArenaAllocator.init(allocator),
-        .allocator = alloc,
+        .arena = arena,
+        .allocator = allocator,
         .method = .UNKNOWN,
         .headers = std.StringHashMap([]const u8).init(allocator),
         .path = "/",
@@ -79,4 +79,34 @@ pub fn processRequestLine(self: *HttpRequest, request_line: []const u8) !void {
 /// Helper to get param value.
 pub fn getParam(self: *const HttpRequest, key: []const u8) ?[]const u8 {
     return self.params.get(key);
+}
+
+/// Helper to get header value
+pub fn getHeader(self: *const HttpRequest, key: []const u8) ?[]const u8 {
+    const lowered_key = std.ascii.allocLowerString(self.allocator, key) orelse return null;
+    return self.headers.get(lowered_key);
+}
+
+pub fn getCookie(self: *const HttpRequest, cookie_name: []const u8) ?[]const u8 {
+    const cookie_header = self.getHeader("cookie") orelse return null;
+
+    // Cookie header format: "a=1; b=two; sid=abc123"
+    const cookie_parts = std.mem.splitScalar(u8, cookie_header, ';');
+    while (cookie_parts.next()) |part_raw| {
+        const part = std.mem.trim(u8, part_raw, " \t");
+
+        const equal_idx = std.mem.indexOfScalar(u8, part, '=') orelse continue;
+        const key_name = std.mem.trim(u8, part[0..equal_idx], "\t");
+
+        if (!std.mem.eql(u8, key_name, cookie_name)) continue;
+
+        const value = std.mem.trim(u8, part[equal_idx + 1 ..], "\t");
+
+        // Optional: strip quotes: sid="abc"
+        if (value.len >= 2 and value[0] == '"' and value[value.len - 1] == '"') {
+            value = value[1 .. value.len - 1];
+        }
+
+        return value;
+    }
 }
