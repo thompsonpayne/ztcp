@@ -4,6 +4,7 @@ const HttpMethod = utils.HttpMethod;
 const HttpVersion = utils.HttpVersion;
 
 const HttpRequest = @This();
+arena: std.heap.ArenaAllocator,
 allocator: std.mem.Allocator,
 method: HttpMethod,
 headers: std.StringHashMap([]const u8),
@@ -13,8 +14,12 @@ body: std.ArrayList(u8),
 params: std.StringHashMap([]const u8),
 
 pub fn init(allocator: std.mem.Allocator) !HttpRequest {
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    const alloc = arena.allocator();
+
     return .{
-        .allocator = allocator,
+        .arena = std.heap.ArenaAllocator.init(allocator),
+        .allocator = alloc,
         .method = .UNKNOWN,
         .headers = std.StringHashMap([]const u8).init(allocator),
         .path = "/",
@@ -25,9 +30,10 @@ pub fn init(allocator: std.mem.Allocator) !HttpRequest {
 }
 
 pub fn deinit(self: *HttpRequest) void {
-    self.headers.deinit();
-    self.params.deinit();
-    self.body.deinit(self.allocator);
+    // self.headers.deinit();
+    // self.params.deinit();
+    // self.body.deinit(self.allocator);
+    self.arena.deinit();
 }
 
 pub fn isBodyRequired(self: HttpRequest) bool {
@@ -52,7 +58,6 @@ pub fn parseMethod(method_str: []const u8) HttpMethod {
 /// Eg: "/POST /login HTTP/1.1\r\n".
 ///
 /// Assign to self.method, self.version, self.path.
-/// self.path needs to be freed by caller
 pub fn processRequestLine(self: *HttpRequest, request_line: []const u8) !void {
     var split_iter = std.mem.splitScalar(u8, request_line, ' ');
 
@@ -60,7 +65,7 @@ pub fn processRequestLine(self: *HttpRequest, request_line: []const u8) !void {
     const method = HttpRequest.parseMethod(m);
 
     const p = split_iter.next() orelse "/";
-    const path = try self.allocator.dupe(u8, p); // WARN: needs to be freed by caller
+    const path = try self.allocator.dupe(u8, p);
     errdefer self.allocator.free(path);
 
     const v = split_iter.next() orelse "HTTP/1.1";

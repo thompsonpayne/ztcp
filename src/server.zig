@@ -155,9 +155,6 @@ pub fn _handleConnection(self: *Self, conn: net.Server.Connection) !void {
             std.log.err("[ERROR] process request line with error: {}\n", .{err});
             return;
         };
-        defer {
-            allocator.free(request.path);
-        }
 
         if (request.method == .UNKNOWN) {
             try writer.writeAll("HTTP/1.1 405 ERROR\r\n");
@@ -444,9 +441,6 @@ test "request line parse" {
     var request = try HttpRequest.init(allocator);
     defer request.deinit();
     try request.processRequestLine(request_line);
-    defer {
-        allocator.free(request.path);
-    }
 
     try testing.expectEqualStrings("POST", @tagName(request.method));
     try testing.expectEqualStrings("/login", request.path);
