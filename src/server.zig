@@ -9,6 +9,9 @@ const utils = @import("http_utils.zig");
 const HttpResponse = @import("http_response.zig");
 const HttpMethod = utils.HttpMethod;
 const StatusCode = utils.StatusCode;
+const Auth = @import("auth.zig");
+
+const Self = @This();
 
 const Options = struct {
     port: ?u16 = null,
@@ -16,7 +19,25 @@ const Options = struct {
     host: ?[]const u8 = null,
 };
 
-const Self = @This();
+pub const Handler = *const fn (
+    allocator: std.mem.Allocator,
+    req: *const HttpRequest, // const here because we don't want caller to modify the request
+    res: *HttpResponse, // WARN: do we want caller to modify the response though?
+) anyerror!void;
+
+pub const MiddlewareResult = enum { Stop, Continue };
+
+pub const Middleware = *const fn (
+    ctx: *anyopaque,
+    route: *const Route,
+    req: *const HttpRequest,
+    res: *HttpResponse,
+) anyerror!MiddlewareResult;
+
+const MiddlewareEntry = struct {
+    ctx: *anyopaque,
+    func: Middleware,
+};
 
 timeout_durations_ms: i32,
 allocator: std.mem.Allocator,
@@ -26,12 +47,7 @@ host: []const u8,
 server: std.net.Server,
 is_listening: bool = false,
 routes: std.ArrayList(Route),
-
-pub const Handler = *const fn (
-    allocator: std.mem.Allocator,
-    req: *const HttpRequest, // const here because we don't want caller to modify the request
-    res: *HttpResponse,
-) anyerror!void;
+middlewares: std.ArrayList(MiddlewareEntry),
 
 /// Default port: 3000
 pub fn init(allocator: std.mem.Allocator, comptime options: Options) !*Self {
@@ -46,6 +62,7 @@ pub fn init(allocator: std.mem.Allocator, comptime options: Options) !*Self {
     self.host = options.host orelse "127.0.0.1";
     self.routes = try .initCapacity(allocator, 64);
     self.timeout_durations_ms = 60_000; // 60s
+    self.middlewares = try .initCapacity(allocator, 16);
 
     return self;
 }
@@ -53,6 +70,7 @@ pub fn init(allocator: std.mem.Allocator, comptime options: Options) !*Self {
 pub fn deinit(self: *Self) void {
     self.pool.deinit();
     self.routes.deinit(self.allocator);
+    self.middlewares.deinit(self.allocator);
 
     if (self.is_listening) {
         self.server.deinit();
@@ -121,7 +139,8 @@ pub fn _handleConnection(self: *Self, conn: net.Server.Connection) !void {
 
         std.debug.print("\n[WAITING] Waiting for data...\n", .{});
 
-        var request = try HttpRequest.init(allocator);
+        var request: HttpRequest = undefined;
+        try request.init(allocator);
         defer request.deinit();
 
         var response = try HttpResponse.init(allocator, writer);
@@ -191,8 +210,8 @@ pub fn _handleConnection(self: *Self, conn: net.Server.Connection) !void {
             if (header.len > 0) {
                 var iter = std.mem.splitScalar(u8, header, ':');
 
-                const key = iter.first();
-                const value = iter.rest(); // handle case where value is: "localhost:8080"
+                const key = request.allocator.dupe(u8, iter.first()) catch "";
+                const value = request.allocator.dupe(u8, iter.rest()) catch ""; // handle case where value is: "localhost:8080"
                 const trimmed_value = std.mem.trim(u8, value, " ");
                 request.headers.put(key, trimmed_value) catch |err| {
                     std.log.err("Invalid header {}\n", .{err});
@@ -244,7 +263,7 @@ pub fn _handleConnection(self: *Self, conn: net.Server.Connection) !void {
 
                 const chunk = dest_slice[0..bytes_read];
 
-                request.body.appendSlice(allocator, chunk) catch |err| {
+                request.body.appendSlice(request.allocator, chunk) catch |err| {
                     std.debug.print("[ERROR] append chunk to body: {}\n", .{err});
                     return;
                 };
@@ -268,6 +287,19 @@ pub fn _handleConnection(self: *Self, conn: net.Server.Connection) !void {
             ) catch false;
 
             if (is_match) {
+                // Run middlewares
+                for (self.middlewares.items) |mw| {
+                    // middleware that denies access should also send the response
+                    // (and set res.headers_sent = true via send()), then return .Stop.
+                    const result = try mw.func(
+                        mw.ctx,
+                        &route,
+                        &request,
+                        &response,
+                    );
+                    if (result == .Stop) continue :blk;
+                }
+
                 // FOUND IT! Run the handler.
                 route.handler(self.allocator, &request, &response) catch |err| {
                     std.log.err("Handler failed: {}", .{err});
@@ -341,10 +373,41 @@ pub fn delete(self: *Self, path: []const u8, handler: Handler) !void {
     });
 }
 
-const Route = struct {
+/// Accept a middleware handler
+/// Then append it to ArrayList(Middleware)
+pub fn use(self: *Self, ctx: anytype, comptime mw: anytype) !void {
+    const CtxPtr = @TypeOf(ctx);
+    // Optional sanity checks:
+    comptime {
+        const info = @typeInfo(CtxPtr);
+        if (info != .pointer) @compileError("ctx must be a pointer type");
+        if (@typeInfo(@TypeOf(mw)) != .@"fn") @compileError("mw must be a function");
+    }
+    const Trampoline = struct {
+        fn call(
+            raw_ctx: *anyopaque,
+            route: *const Route,
+            req: *const HttpRequest,
+            res: *HttpResponse,
+        ) anyerror!MiddlewareResult {
+            // Correct Zig 0.15 style:
+            // - @alignCast is needed because we're increasing alignment from *anyopaque to *T
+            // - @ptrCast infers destination from the variable type (CtxPtr)
+            const typed_ctx: CtxPtr = @ptrCast(@alignCast(raw_ctx));
+            return mw(typed_ctx, route, req, res);
+        }
+    };
+    try self.middlewares.append(self.allocator, .{
+        .ctx = @ptrCast(ctx), // *T -> *anyopaque (no alignment increase)
+        .func = &Trampoline.call, // function pointer compatible with Middleware
+    });
+}
+
+pub const Route = struct {
     method: HttpMethod,
     pattern: []const u8,
     handler: Self.Handler,
+    auth: Auth.AuthPolicy = .public,
 
     fn matchRoute(
         route_pattern: []const u8,
@@ -438,7 +501,8 @@ test "request line parse" {
     const allocator = testing.allocator;
     const request_line: []const u8 = "POST /login HTTP/1.1";
 
-    var request = try HttpRequest.init(allocator);
+    var request: HttpRequest = undefined;
+    try request.init(allocator);
     defer request.deinit();
     try request.processRequestLine(request_line);
 

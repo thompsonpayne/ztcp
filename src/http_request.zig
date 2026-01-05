@@ -13,20 +13,24 @@ version: HttpVersion,
 body: std.ArrayList(u8),
 params: std.StringHashMap([]const u8),
 
-pub fn init(a: std.mem.Allocator) !HttpRequest {
-    var arena = std.heap.ArenaAllocator.init(a);
-    const allocator = arena.allocator();
+/// Initialize this request using an arena allocator.
+///
+/// NOTE: `ArenaAllocator.allocator()` returns an allocator whose context
+/// pointer references the arena *by address*. If the arena is copied (e.g. by
+/// returning a request struct by value), the allocator can end up pointing at a
+/// dead stack temporary, causing crashes on the first allocation.
+pub fn init(self: *HttpRequest, backing_allocator: std.mem.Allocator) !void {
+    self.arena = std.heap.ArenaAllocator.init(backing_allocator);
+    errdefer self.arena.deinit();
 
-    return .{
-        .arena = arena,
-        .allocator = allocator,
-        .method = .UNKNOWN,
-        .headers = std.StringHashMap([]const u8).init(allocator),
-        .path = "/",
-        .version = HttpVersion.Http1_1,
-        .body = try std.ArrayList(u8).initCapacity(allocator, 4096),
-        .params = std.StringHashMap([]const u8).init(allocator),
-    };
+    self.allocator = self.arena.allocator();
+
+    self.method = .UNKNOWN;
+    self.headers = std.StringHashMap([]const u8).init(self.allocator);
+    self.path = "/";
+    self.version = HttpVersion.Http1_1;
+    self.body = try std.ArrayList(u8).initCapacity(self.allocator, 4096);
+    self.params = std.StringHashMap([]const u8).init(self.allocator);
 }
 
 pub fn deinit(self: *HttpRequest) void {

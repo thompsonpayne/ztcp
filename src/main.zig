@@ -1,12 +1,20 @@
 const std = @import("std");
+const Auth = @import("auth.zig");
 const HttpRequest = @import("http_request.zig");
 const HttpResponse = @import("http_response.zig");
 const DServer = @import("server.zig");
+const Route = DServer.Route;
 const utils = @import("http_utils.zig");
 const ResponseBody = HttpResponse.ResponseBody;
 
 const PORT = 5882;
 const HOST = "127.0.0.1";
+
+const AuthCtx = struct {
+    auth: *Auth.Auth, // contains jwt secret + refresh store + mutex
+    issuer: []const u8,
+    audience: []const u8,
+};
 
 pub fn main() !void {
     var gpa = std.heap.DebugAllocator(.{}){};
@@ -16,7 +24,10 @@ pub fn main() !void {
         }
     }
 
-    const allocator = gpa.allocator();
+    const a = gpa.allocator();
+
+    var tsa = std.heap.ThreadSafeAllocator{ .child_allocator = a };
+    const allocator = tsa.allocator();
 
     var server = try DServer.init(allocator, .{
         .host = HOST,
@@ -26,6 +37,12 @@ pub fn main() !void {
     defer server.deinit();
 
     std.debug.print("Listening at: {d}\n", .{PORT});
+
+    var auth = Auth.Auth.init(allocator);
+    defer auth.deinit();
+    var auth_ctx = AuthCtx{ .auth = &auth, .issuer = "zig-tcp", .audience = "zig-tcp-api" };
+
+    try server.use(&auth_ctx, authHandler);
 
     // Register dynamic route
     try server.get("/users/:id", handleGetUser);
@@ -62,4 +79,17 @@ pub fn handleComment(allocator: std.mem.Allocator, req: *const HttpRequest, res:
 
     res.status(utils.StatusCode.OK);
     try res.json(result.items);
+}
+
+pub fn authHandler(
+    ctx: *AuthCtx,
+    route: *const Route,
+    req: *const HttpRequest,
+    res: *HttpResponse,
+) !DServer.MiddlewareResult {
+    _ = ctx;
+    _ = route;
+    _ = req;
+    _ = res;
+    return .Continue;
 }
