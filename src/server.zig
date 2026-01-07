@@ -287,6 +287,7 @@ pub fn _handleConnection(self: *Self, conn: net.Server.Connection) !void {
             ) catch false;
 
             if (is_match) {
+                std.debug.print("[INFO] Staring route handler\n", .{});
                 // Run middlewares
                 for (self.middlewares.items) |mw| {
                     // middleware that denies access should also send the response
@@ -297,6 +298,7 @@ pub fn _handleConnection(self: *Self, conn: net.Server.Connection) !void {
                         &request,
                         &response,
                     );
+                    std.debug.print("[INFO] result from middleware: {any}\n", .{result});
                     if (result == .Stop) continue :blk;
                 }
 

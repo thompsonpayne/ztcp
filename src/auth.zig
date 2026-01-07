@@ -51,53 +51,60 @@ pub const Auth = struct {
     sessions: std.StringHashMap(Session),
     sessions_mu: std.Thread.Mutex,
 
-    jwt_secret: []const u8 = "secret",
+    jwt_secret: []const u8,
 
-    pub fn init(allocator: std.mem.Allocator) Auth {
-        var arena = std.heap.ArenaAllocator.init(allocator);
-        const a = arena.allocator();
+    pub fn init(self: *Auth, allocator: std.mem.Allocator) !void {
+        self.arena = .init(allocator);
+        const a = self.arena.allocator();
 
-        return .{
-            .sessions = std.StringHashMap(Session).init(a),
-            .sessions_mu = .{},
-            .allocator = a,
-            .arena = arena,
-        };
+        self.allocator = a;
+        self.sessions = .init(a);
+        self.sessions_mu = .{};
+        self.jwt_secret = "secret";
     }
 
     pub fn deinit(self: *Auth) void {
+        self.sessions.deinit();
         self.arena.deinit();
     }
 
-    pub fn authenticate(self: *Auth, req: *const HttpRequest) Authn {
+    pub fn authenticate(self: *Auth, req: *const HttpRequest) !Authn {
         // try Authorization: Bearer tokens first
         // fallback to sid (cookie)
 
         // prioritize authorization header
         if (req.getHeader("authorization")) |auth_token| {
             const token = parseBearer(auth_token) orelse return .invalid;
-            const parts = std.mem.splitScalar(u8, token, '.');
+            var parts = std.mem.splitScalar(u8, token, '.');
 
-            const header_base64 = parts.first();
-            const header_json = decodeBase64url(self.allocator, header_base64) catch return .invalid;
+            const header_b64 = parts.first();
+            // const header_json = decodeBase64url(self.allocator, header_b64) catch return .invalid;
 
-            const payload_base64 = parts.next() orelse return .invalid;
-            const payload_json = decodeBase64url(self.allocator, payload_base64) catch return .invalid;
+            const payload_b64 = parts.next() orelse return .invalid;
+            const payload_json = decodeBase64url(req.allocator, payload_b64) catch return .invalid;
+            defer self.allocator.free(payload_json);
 
-            const signature_base64 = parts.next() orelse return .invalid;
-            const signature = decodeBase64url(self.allocator, signature_base64) catch return .invalid;
+            const signature_b64 = parts.next() orelse return .invalid;
+            // const signature = decodeBase64url(self.allocator, signature_b64) catch return .invalid;
 
-            const signing_input = try std.mem.concat(
-                self.allocator,
-                u8,
-                &[_][]const u8{ header_json, ".", payload_json },
-            );
-            const expected_sig = sha256Hash(signing_input, self.jwt_secret);
-            const expected_sig_base64 = try encodeBase64url(self.allocator, expected_sig);
+            var hmac = std.crypto.auth.hmac.sha2.HmacSha256.init(self.jwt_secret);
+            hmac.update(header_b64);
+            hmac.update(".");
+            hmac.update(payload_b64);
 
-            if (!std.mem.eql(u8, signature, expected_sig_base64)) return .invalid;
+            var computed_digest: [std.crypto.auth.hmac.sha2.HmacSha256.mac_length]u8 = undefined;
+            hmac.final(&computed_digest);
 
-            const claims = parseJwtClaims(payload_json) catch return .invalid;
+            const encoder = std.base64.url_safe_no_pad.Encoder;
+
+            var computed_sig_buf: [64]u8 = undefined;
+            const computed_sig_str = encoder.encode(&computed_sig_buf, &computed_digest);
+
+            if (!std.mem.eql(u8, signature_b64, computed_sig_str)) return .invalid;
+
+            const claims_parsed = parseJwtClaims(req.allocator, payload_json) catch return .invalid;
+            const claims = claims_parsed.value;
+            defer claims_parsed.deinit();
 
             // validate exp (+ small clock skew)
             if (std.time.milliTimestamp() > claims.exp) return .invalid;
@@ -105,11 +112,14 @@ pub const Auth = struct {
             // optional iss/aud checks
             // if (!issOk || !audOk) return .invalid;
 
+            const user_id = try self.allocator.dupe(u8, claims.sub);
+            errdefer self.allocator.free(user_id);
+
             return .{
                 .principal = .{
-                    .user_id = claims.sub,
+                    .user_id = user_id,
                     .scheme = .bearer,
-                    .is_admin = claims.admin orelse false,
+                    .is_admin = claims.admin,
                 },
             };
         }
@@ -123,7 +133,7 @@ pub const Auth = struct {
 
             if (self.sessions.get(sid)) |session| {
                 if (now_ms >= session.expiry_at_ms) {
-                    self.sessions.remove(sid);
+                    _ = self.sessions.remove(sid);
                     return .invalid;
                 }
                 return .{ .principal = session.principal };
@@ -174,7 +184,6 @@ fn decodeBase64url(allocator: std.mem.Allocator, encoded: []const u8) ![]const u
 
     const max_len = try Decoder.calcSizeForSlice(encoded);
     const decoded_buffer = try allocator.alloc(u8, max_len);
-    defer allocator.free(decoded_buffer);
 
     try Decoder.decode(decoded_buffer, encoded);
 
@@ -207,18 +216,23 @@ const Claim = struct {
     aud: []const u8,
 };
 
-// TODO: parse claims
-fn parseJwtClaims(allocator: std.mem.Allocator, claims: []const u8) !Claim {
-    // Example claim
-    // {
-    //     sub: user-123,
-    //     admin: true,
-    //     iat: 1700000000,
-    //     exp: 1700000900,
-    //     iss: zig-tcp,
-    //     aud: zig-tcp-api
-    // }
+/// Parse Jwt payload
+/// Example claim
+/// {
+///     sub: user-123,
+///     admin: true,
+///     iat: 1700000000,
+///     exp: 1700000900,
+///     iss: zig-tcp,
+///     aud: zig-tcp-api
+/// }
+fn parseJwtClaims(allocator: std.mem.Allocator, claims: []const u8) !std.json.Parsed(Claim) {
+    const parsed = try std.json.parseFromSlice(
+        Claim,
+        allocator,
+        claims,
+        .{ .ignore_unknown_fields = true },
+    );
 
-    const parsed = try std.json.parseFromSlice(Claim, allocator, claims, .{ .ignore_unknown_fields = true });
-    return parsed.value;
+    return parsed;
 }

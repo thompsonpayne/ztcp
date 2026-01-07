@@ -87,7 +87,7 @@ pub fn getParam(self: *const HttpRequest, key: []const u8) ?[]const u8 {
 
 /// Helper to get header value
 pub fn getHeader(self: *const HttpRequest, key: []const u8) ?[]const u8 {
-    const lowered_key = std.ascii.allocLowerString(self.allocator, key) orelse return null;
+    const lowered_key = std.ascii.allocLowerString(self.allocator, key) catch return null;
     return self.headers.get(lowered_key);
 }
 
@@ -95,7 +95,7 @@ pub fn getCookie(self: *const HttpRequest, cookie_name: []const u8) ?[]const u8 
     const cookie_header = self.getHeader("cookie") orelse return null;
 
     // Cookie header format: "a=1; b=two; sid=abc123"
-    const cookie_parts = std.mem.splitScalar(u8, cookie_header, ';');
+    var cookie_parts = std.mem.splitScalar(u8, cookie_header, ';');
     while (cookie_parts.next()) |part_raw| {
         const part = std.mem.trim(u8, part_raw, " \t");
 
@@ -104,7 +104,7 @@ pub fn getCookie(self: *const HttpRequest, cookie_name: []const u8) ?[]const u8 
 
         if (!std.mem.eql(u8, key_name, cookie_name)) continue;
 
-        const value = std.mem.trim(u8, part[equal_idx + 1 ..], "\t");
+        var value = std.mem.trim(u8, part[equal_idx + 1 ..], "\t");
 
         // Optional: strip quotes: sid="abc"
         if (value.len >= 2 and value[0] == '"' and value[value.len - 1] == '"') {
@@ -113,4 +113,6 @@ pub fn getCookie(self: *const HttpRequest, cookie_name: []const u8) ?[]const u8 
 
         return value;
     }
+
+    return null;
 }

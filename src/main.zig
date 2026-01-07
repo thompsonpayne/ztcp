@@ -1,5 +1,6 @@
 const std = @import("std");
-const Auth = @import("auth.zig");
+const auth_mod = @import("auth.zig");
+const Auth = auth_mod.Auth;
 const HttpRequest = @import("http_request.zig");
 const HttpResponse = @import("http_response.zig");
 const DServer = @import("server.zig");
@@ -11,7 +12,7 @@ const PORT = 5882;
 const HOST = "127.0.0.1";
 
 const AuthCtx = struct {
-    auth: *Auth.Auth, // contains jwt secret + refresh store + mutex
+    auth: *Auth, // contains jwt secret + refresh store + mutex
     issuer: []const u8,
     audience: []const u8,
 };
@@ -38,7 +39,8 @@ pub fn main() !void {
 
     std.debug.print("Listening at: {d}\n", .{PORT});
 
-    var auth = Auth.Auth.init(allocator);
+    var auth: Auth = undefined;
+    try auth.init(allocator);
     defer auth.deinit();
     var auth_ctx = AuthCtx{ .auth = &auth, .issuer = "zig-tcp", .audience = "zig-tcp-api" };
 
@@ -87,9 +89,30 @@ pub fn authHandler(
     req: *const HttpRequest,
     res: *HttpResponse,
 ) !DServer.MiddlewareResult {
-    _ = ctx;
     _ = route;
-    _ = req;
-    _ = res;
+
+    std.debug.print("[INFO] Authing ...", .{});
+    const authn = try ctx.auth.authenticate(req);
+    const authz = try ctx.auth.authorize(.any_authenticated, authn);
+
+    std.debug.print("[INFO] Got auth info, checking auth", .{});
+    switch (authz) {
+        .allow => |maybe_principal| {
+            _ = maybe_principal orelse return .Stop;
+            return .Continue;
+        },
+        .unauthorized => {
+            res.status(.Unauthorized);
+            try res.json("Not authorized");
+            return .Stop;
+        },
+        .forbidden => {
+            res.status(.Forbidden);
+            try res.json("Forbidden");
+            return .Stop;
+        },
+    }
+
+    std.debug.print("Issuer: {s}\n", .{ctx.issuer});
     return .Continue;
 }
