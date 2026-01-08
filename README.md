@@ -3,22 +3,23 @@
 
 <h1>Todos</h1>
 
-- [x] Setup connection handler
-- [x] Setup HttpRequest struct
-- [x] Setup HttpResponse struct
-- [x] Implement Server struct (HTTP Server)
-  - [x] Handle connection timedout/idle time
-  - [x] Add route matching  
-  - [x] Add middleware handling support
-  - [ ] Gracefully shutdown?
+- [x] Setup connection handler.
+- [x] Setup HttpRequest struct.
+- [x] Setup HttpResponse struct.
+- [x] Implement Server struct (HTTP Server).
+  - [x] Handle connection timedout/idle time.
+  - [x] Add route matching.
+  - [x] Add middleware handling support, allow passing custom auth context.
+  - [x] Add context for server/ route handlers, allow passing db instance inside context.
+  - [] Add pg db example.
 - [x] Parse headers:
-  - [x] Parse request line
-  - [x] Parse headers
-  - [x] Parse content body
+  - [x] Parse request line.
+  - [x] Parse headers.
+  - [x] Parse content body.
   - [ ] Handle MIME tags?
 - [x] Format response:
-  - [x] Append correct headers
-  - [x] Append correct text content (plain text, json)
+  - [x] Append correct headers.
+  - [x] Append correct text content (plain text, json).
 
 Basic usage:
 
