@@ -7,8 +7,6 @@ const HttpResponse = @import("http_response.zig");
 const server_mod = @import("server.zig");
 
 const Auth = auth_mod.Auth;
-const DServer = server_mod.Server;
-const Route = server_mod.Route;
 const ResponseBody = HttpResponse.ResponseBody;
 
 const PORT = 5882;
@@ -21,6 +19,8 @@ const AuthCtx = struct {
 };
 
 const AppCtx = struct { db: *pg.Pool };
+const DServer = server_mod.Server(AppCtx);
+const Route = DServer.Route;
 
 pub fn main() !void {
     var gpa = std.heap.DebugAllocator(.{}){};
@@ -48,7 +48,7 @@ pub fn main() !void {
     };
     defer db.deinit();
 
-    var server = try DServer(AppCtx).init(allocator, .{
+    var server = try DServer.init(allocator, .{
         .host = HOST,
         .n_threads = 4,
         .port = PORT,
@@ -80,9 +80,10 @@ pub fn main() !void {
     };
 }
 
-pub fn handleGetUser(allocator: std.mem.Allocator, req: *const HttpRequest, res: *HttpResponse) !void {
+pub fn handleGetUser(allocator: std.mem.Allocator, req: *const HttpRequest, res: *HttpResponse, ctx: *AppCtx) !void {
     _ = allocator;
     _ = req;
+    _ = ctx;
 
     const body: ResponseBody([]const u8) = .{
         .message = "Success getting user",
@@ -102,7 +103,9 @@ pub fn handleGetUser(allocator: std.mem.Allocator, req: *const HttpRequest, res:
     try res.json(body);
 }
 
-pub fn handleComment(allocator: std.mem.Allocator, req: *const HttpRequest, res: *HttpResponse) !void {
+pub fn handleComment(allocator: std.mem.Allocator, req: *const HttpRequest, res: *HttpResponse, ctx: *AppCtx) !void {
+    _ = ctx;
+
     const postId = req.getParam("postId") orelse "";
     const commentId = req.getParam("commentId") orelse "";
 

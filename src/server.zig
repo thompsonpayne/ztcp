@@ -10,31 +10,76 @@ const HttpMethod = utils.HttpMethod;
 const StatusCode = utils.StatusCode;
 const Auth = @import("auth.zig");
 
-pub const Handler = *const fn (
-    allocator: std.mem.Allocator,
-    req: *const HttpRequest, // const here because we don't want caller to modify the request
-    res: *HttpResponse, // WARN: do we want caller to modify the response though?
-) anyerror!void;
-
 pub const MiddlewareResult = enum { Stop, Continue };
 
-pub const Middleware = *const fn (
-    ctx: *anyopaque,
-    route: *const Route,
-    req: *const HttpRequest,
-    res: *HttpResponse,
-) anyerror!MiddlewareResult;
-
-const MiddlewareEntry = struct {
-    ctx: *anyopaque,
-    func: Middleware,
-};
-
 pub fn Server(comptime CtxType: type) type {
+    const Handler = *const fn (
+        allocator: std.mem.Allocator,
+        req: *const HttpRequest, // const here because we don't want caller to modify the request
+        res: *HttpResponse, // WARN: do we want caller to modify the response though?
+        ctx: *CtxType,
+    ) anyerror!void;
     return struct {
         const Self = @This();
 
-        const Options = struct {
+        pub const Route = struct {
+            method: HttpMethod,
+            pattern: []const u8,
+            handler: Handler,
+            auth: Auth.AuthPolicy = .public,
+
+            fn matchRoute(
+                route_pattern: []const u8,
+                request_path: []const u8,
+                params: *std.StringHashMap([]const u8),
+            ) !bool {
+                var route_it = std.mem.splitScalar(u8, route_pattern, '/');
+                var req_it = std.mem.splitScalar(u8, request_path, '/');
+
+                while (true) {
+                    const route_part = route_it.next();
+                    const req_part = req_it.next();
+
+                    // if both end at the same time, it's a match
+                    if (route_part == null and req_part == null) return true;
+
+                    // if lengths mismatch, fail
+                    if (route_part == null or req_part == null) return false;
+
+                    const r_p = route_part orelse "";
+                    const r_q = req_part orelse "";
+
+                    // skip empty parts from leading/trailing slashes
+                    if (r_p.len == 0 and r_q.len == 0) continue;
+
+                    // 1. check for Parameter (starts with ':')
+                    if (r_p.len > 0 and r_p[0] == ':') {
+                        // it's a match! Capture the value.
+                        // key = "id" (from ":id"), value = "123"
+                        try params.put(r_p[1..], r_q);
+                    }
+
+                    // check for Exact String Match
+                    else if (!std.mem.eql(u8, r_p, r_q)) {
+                        return false;
+                    }
+                }
+            }
+        };
+
+        pub const Middleware = *const fn (
+            ctx: *anyopaque,
+            route: *const Route,
+            req: *const HttpRequest,
+            res: *HttpResponse,
+        ) anyerror!MiddlewareResult;
+
+        pub const MiddlewareEntry = struct {
+            ctx: *anyopaque,
+            func: Middleware,
+        };
+
+        pub const Options = struct {
             port: ?u16 = null,
             n_threads: ?u8 = null,
             host: ?[]const u8 = null,
@@ -50,6 +95,7 @@ pub fn Server(comptime CtxType: type) type {
         is_listening: bool = false,
         routes: std.ArrayList(Route),
         middlewares: std.ArrayList(MiddlewareEntry),
+        ctx: CtxType,
 
         /// Default port: 3000
         pub fn init(allocator: std.mem.Allocator, options: Options) !*Self {
@@ -65,6 +111,7 @@ pub fn Server(comptime CtxType: type) type {
             self.routes = try .initCapacity(allocator, 64);
             self.timeout_durations_ms = 60_000; // 60s
             self.middlewares = try .initCapacity(allocator, 16);
+            self.ctx = options.ctx orelse undefined;
 
             return self;
         }
@@ -305,7 +352,7 @@ pub fn Server(comptime CtxType: type) type {
                         }
 
                         // FOUND IT! Run the handler.
-                        route.handler(self.allocator, &request, &response) catch |err| {
+                        route.handler(self.allocator, &request, &response, &self.ctx) catch |err| {
                             std.log.err("Handler failed: {}", .{err});
 
                             // force a 500 response if headers weren't sent yet
@@ -410,51 +457,6 @@ pub fn Server(comptime CtxType: type) type {
         }
     };
 }
-
-pub const Route = struct {
-    method: HttpMethod,
-    pattern: []const u8,
-    handler: Handler,
-    auth: Auth.AuthPolicy = .public,
-
-    fn matchRoute(
-        route_pattern: []const u8,
-        request_path: []const u8,
-        params: *std.StringHashMap([]const u8),
-    ) !bool {
-        var route_it = std.mem.splitScalar(u8, route_pattern, '/');
-        var req_it = std.mem.splitScalar(u8, request_path, '/');
-
-        while (true) {
-            const route_part = route_it.next();
-            const req_part = req_it.next();
-
-            // if both end at the same time, it's a match
-            if (route_part == null and req_part == null) return true;
-
-            // if lengths mismatch, fail
-            if (route_part == null or req_part == null) return false;
-
-            const r_p = route_part orelse "";
-            const r_q = req_part orelse "";
-
-            // skip empty parts from leading/trailing slashes
-            if (r_p.len == 0 and r_q.len == 0) continue;
-
-            // 1. check for Parameter (starts with ':')
-            if (r_p.len > 0 and r_p[0] == ':') {
-                // it's a match! Capture the value.
-                // key = "id" (from ":id"), value = "123"
-                try params.put(r_p[1..], r_q);
-            }
-
-            // check for Exact String Match
-            else if (!std.mem.eql(u8, r_p, r_q)) {
-                return false;
-            }
-        }
-    }
-};
 
 pub fn waitReadableUntil(stream: std.net.Stream, deadline_ms: i64) !void {
     const deadline_actual_time = std.time.milliTimestamp() + deadline_ms;
