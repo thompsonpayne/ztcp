@@ -1,11 +1,14 @@
 const std = @import("std");
+const pg = @import("pg");
 const auth_mod = @import("auth.zig");
-const Auth = auth_mod.Auth;
+const utils = @import("http_utils.zig");
 const HttpRequest = @import("http_request.zig");
 const HttpResponse = @import("http_response.zig");
-const DServer = @import("server.zig");
-const Route = DServer.Route;
-const utils = @import("http_utils.zig");
+const server_mod = @import("server.zig");
+
+const Auth = auth_mod.Auth;
+const DServer = server_mod.Server;
+const Route = server_mod.Route;
 const ResponseBody = HttpResponse.ResponseBody;
 
 const PORT = 5882;
@@ -16,6 +19,8 @@ const AuthCtx = struct {
     issuer: []const u8,
     audience: []const u8,
 };
+
+const AppCtx = struct { db: *pg.Pool };
 
 pub fn main() !void {
     var gpa = std.heap.DebugAllocator(.{}){};
@@ -30,10 +35,24 @@ pub fn main() !void {
     var tsa = std.heap.ThreadSafeAllocator{ .child_allocator = a };
     const allocator = tsa.allocator();
 
-    var server = try DServer.init(allocator, .{
+    var db = pg.Pool.init(allocator, .{
+        .connect = .{ .port = 5433, .host = "localhost" },
+        .auth = .{
+            .username = "postgres",
+            .database = "postgres",
+            .password = "secret",
+        },
+    }) catch |err| {
+        std.debug.print("Error connecting db: {}\n", .{err});
+        return err;
+    };
+    defer db.deinit();
+
+    var server = try DServer(AppCtx).init(allocator, .{
         .host = HOST,
         .n_threads = 4,
         .port = PORT,
+        .ctx = .{ .db = db },
     });
     defer server.deinit();
 
@@ -42,9 +61,13 @@ pub fn main() !void {
     var auth: Auth = undefined;
     try auth.init(allocator);
     defer auth.deinit();
-    var auth_ctx = AuthCtx{ .auth = &auth, .issuer = "zig-tcp", .audience = "zig-tcp-api" };
+    var app_ctx = AuthCtx{
+        .auth = &auth,
+        .issuer = "zig-tcp",
+        .audience = "zig-tcp-api",
+    };
 
-    try server.use(&auth_ctx, authHandler);
+    try server.use(&app_ctx, authHandler);
 
     // Register dynamic route
     try server.get("/users/:id", handleGetUser);
@@ -65,6 +88,15 @@ pub fn handleGetUser(allocator: std.mem.Allocator, req: *const HttpRequest, res:
         .message = "Success getting user",
         .data = "User A",
     };
+
+    // var row = try app.db.row("select name from tasks where id = $1", .{task_id}) orelse {
+    //     res.status = 404;
+    //     res.body = "Not Found";
+    //     return;
+    // };
+    // defer row.deinit() catch |err| {
+    //     std.debug.print("Error cleaning up row query: {}", .{err});
+    // };
 
     res.status(utils.StatusCode.OK);
     try res.json(body);
@@ -88,7 +120,7 @@ pub fn authHandler(
     route: *const Route,
     req: *const HttpRequest,
     res: *HttpResponse,
-) !DServer.MiddlewareResult {
+) !server_mod.MiddlewareResult {
     _ = route;
 
     std.debug.print("[INFO] Authing ...", .{});

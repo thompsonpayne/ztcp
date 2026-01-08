@@ -162,4 +162,11 @@ pub fn build(b: *std.Build) void {
     const check_step = b.step("check", "Runs a build check");
     check_step.dependOn(&exe_check.step); // Depend on your main artifact's step
 
+    const pg = b.dependency("pg", .{
+        .target = target,
+        .optimize = optimize,
+    });
+
+    // the executable from your call to b.addExecutable(...)
+    exe.root_module.addImport("pg", pg.module("pg"));
 }

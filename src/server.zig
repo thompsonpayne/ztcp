@@ -1,5 +1,4 @@
 /// HTTP Server
-/// TODO: Add support for http2, http3 versions
 const std = @import("std");
 const posix = std.posix;
 const testing = std.testing;
@@ -10,14 +9,6 @@ const HttpResponse = @import("http_response.zig");
 const HttpMethod = utils.HttpMethod;
 const StatusCode = utils.StatusCode;
 const Auth = @import("auth.zig");
-
-const Self = @This();
-
-const Options = struct {
-    port: ?u16 = null,
-    n_threads: ?u8 = null,
-    host: ?[]const u8 = null,
-};
 
 pub const Handler = *const fn (
     allocator: std.mem.Allocator,
@@ -39,376 +30,391 @@ const MiddlewareEntry = struct {
     func: Middleware,
 };
 
-timeout_durations_ms: i32,
-allocator: std.mem.Allocator,
-pool: std.Thread.Pool,
-port: u16,
-host: []const u8,
-server: std.net.Server,
-is_listening: bool = false,
-routes: std.ArrayList(Route),
-middlewares: std.ArrayList(MiddlewareEntry),
+pub fn Server(comptime CtxType: type) type {
+    return struct {
+        const Self = @This();
 
-/// Default port: 3000
-pub fn init(allocator: std.mem.Allocator, comptime options: Options) !*Self {
-    const self = try allocator.create(Self);
-    errdefer allocator.destroy(self);
-
-    try self.pool.init(.{ .allocator = allocator, .n_jobs = options.n_threads orelse 1 });
-
-    self.server = undefined;
-    self.allocator = allocator;
-    self.port = options.port orelse 3000;
-    self.host = options.host orelse "127.0.0.1";
-    self.routes = try .initCapacity(allocator, 64);
-    self.timeout_durations_ms = 60_000; // 60s
-    self.middlewares = try .initCapacity(allocator, 16);
-
-    return self;
-}
-
-pub fn deinit(self: *Self) void {
-    self.pool.deinit();
-    self.routes.deinit(self.allocator);
-    self.middlewares.deinit(self.allocator);
-
-    if (self.is_listening) {
-        self.server.deinit();
-    }
-
-    self.is_listening = false;
-    self.allocator.destroy(self);
-}
-
-pub fn serve(self: *Self) !void {
-    const address = try std.net.Address.parseIp4(self.host, self.port);
-    self.server = try address.listen(.{ .reuse_address = true });
-    self.is_listening = true;
-
-    std.log.info("Listening on {s}:{d}", .{ self.host, self.port });
-
-    while (true) {
-        const connection = try self.server.accept();
-
-        self.pool.spawn(handleConnection, .{ self, connection }) catch |err| {
-            std.log.err("[ERROR][Serve] threads handling connection: {}\n", .{err});
-            connection.stream.close();
+        const Options = struct {
+            port: ?u16 = null,
+            n_threads: ?u8 = null,
+            host: ?[]const u8 = null,
+            ctx: ?CtxType = null,
         };
-    }
-}
 
-pub fn handleConnection(self: *Self, connection: net.Server.Connection) void {
-    _handleConnection(self, connection) catch |err| {
-        std.debug.print("[ERROR] handle connection: {}\n", .{err});
-        return;
-    };
-}
+        timeout_durations_ms: i32,
+        allocator: std.mem.Allocator,
+        pool: std.Thread.Pool,
+        port: u16,
+        host: []const u8,
+        server: std.net.Server,
+        is_listening: bool = false,
+        routes: std.ArrayList(Route),
+        middlewares: std.ArrayList(MiddlewareEntry),
 
-pub fn _handleConnection(self: *Self, conn: net.Server.Connection) !void {
-    const allocator = self.allocator;
-    // NOTE: example of a request
-    // POST /login HTTP/1.1\r\n
-    // Host: example.com\r\n
-    // User-Agent: Mozilla/5.0\r\n
-    // Content-Type: application/json\r\n
-    // Content-Length: 18\r\n
-    // \r\n
-    // {"user": "admin"}
+        /// Default port: 3000
+        pub fn init(allocator: std.mem.Allocator, options: Options) !*Self {
+            const self = try allocator.create(Self);
+            errdefer allocator.destroy(self);
 
-    defer {
-        std.log.debug("[INFO] Client disconnected: {d}", .{conn.address.getPort()});
-        conn.stream.close();
-    }
+            try self.pool.init(.{ .allocator = allocator, .n_jobs = options.n_threads orelse 1 });
 
-    std.log.debug("Client connected: {d}", .{conn.address.getPort()});
+            self.server = undefined;
+            self.allocator = allocator;
+            self.port = options.port orelse 3000;
+            self.host = options.host orelse "127.0.0.1";
+            self.routes = try .initCapacity(allocator, 64);
+            self.timeout_durations_ms = 60_000; // 60s
+            self.middlewares = try .initCapacity(allocator, 16);
 
-    var read_buf: [4096]u8 = undefined;
-    // var net_reader = std.net.Stream.Reader.init(connection.stream, &read_buf);
-    // const reader = &net_reader.file_reader.interface;
+            return self;
+        }
 
-    var s_reader = conn.stream.reader(&read_buf);
-    var reader = &s_reader.file_reader.interface;
+        pub fn deinit(self: *Self) void {
+            self.pool.deinit();
+            self.routes.deinit(self.allocator);
+            self.middlewares.deinit(self.allocator);
 
-    var write_buf: [4096]u8 = undefined;
-    var w = conn.stream.writer(&write_buf);
-    var writer = &w.interface;
+            if (self.is_listening) {
+                self.server.deinit();
+            }
 
-    blk: while (true) {
-        // NOTE: request line example
-        // POST /login HTTP/1.1\r\n
+            self.is_listening = false;
+            self.allocator.destroy(self);
+        }
 
-        std.debug.print("\n[WAITING] Waiting for data...\n", .{});
+        pub fn serve(self: *Self) !void {
+            const address = try std.net.Address.parseIp4(self.host, self.port);
+            self.server = try address.listen(.{ .reuse_address = true });
+            self.is_listening = true;
 
-        var request: HttpRequest = undefined;
-        try request.init(allocator);
-        defer request.deinit();
+            std.log.info("Listening on {s}:{d}", .{ self.host, self.port });
 
-        var response = try HttpResponse.init(allocator, writer);
-        defer response.deinit();
+            while (true) {
+                const connection = try self.server.accept();
 
-        if (reader.seek == reader.end) {
-            waitReadableUntil(conn.stream, self.timeout_durations_ms) catch {
-                response.status(StatusCode.ConnectionTimedOut);
-                try response.send("Connection timed out");
-                break :blk;
+                self.pool.spawn(handleConnection, .{ self, connection }) catch |err| {
+                    std.log.err("[ERROR][Serve] threads handling connection: {}\n", .{err});
+                    connection.stream.close();
+                };
+            }
+        }
+
+        pub fn handleConnection(self: *Self, connection: net.Server.Connection) void {
+            _handleConnection(self, connection) catch |err| {
+                std.debug.print("[ERROR] handle connection: {}\n", .{err});
+                return;
             };
         }
 
-        // READ REQUEST
-        const line_slice = reader.takeDelimiterInclusive('\n') catch |err| switch (err) {
-            // Breaks the loop -> Triggers defer -> Closes socket
-            error.EndOfStream => break,
-            else => {
-                std.debug.print("[ERROR] Read Error: {}\n", .{err});
-                break;
-            },
-        };
+        pub fn _handleConnection(self: *Self, conn: net.Server.Connection) !void {
+            const allocator = self.allocator;
+            // NOTE: example of a request
+            // POST /login HTTP/1.1\r\n
+            // Host: example.com\r\n
+            // User-Agent: Mozilla/5.0\r\n
+            // Content-Type: application/json\r\n
+            // Content-Length: 18\r\n
+            // \r\n
+            // {"user": "admin"}
 
-        const request_line = std.mem.trimEnd(u8, line_slice, "\r\n");
-        if (request_line.len == 0) {
-            continue;
-        }
-
-        // process request line
-        request.processRequestLine(request_line) catch |err| {
-            std.log.err("[ERROR] process request line with error: {}\n", .{err});
-            return;
-        };
-
-        if (request.method == .UNKNOWN) {
-            try writer.writeAll("HTTP/1.1 405 ERROR\r\n");
-            try writer.writeAll("Unknown method\r\n");
-            try writer.flush();
-            continue;
-        }
-
-        var content_length: u16 = 0;
-
-        // HEADERS PARSING
-        while (true) {
-            if (reader.seek == reader.end) {
-                waitReadableUntil(conn.stream, self.timeout_durations_ms) catch {
-                    response.status(StatusCode.ConnectionTimedOut);
-                    try response.send("Connection timed out");
-                    break :blk;
-                };
+            defer {
+                std.log.debug("[INFO] Client disconnected: {d}", .{conn.address.getPort()});
+                conn.stream.close();
             }
 
-            const header_slice = reader.takeDelimiterInclusive('\n') catch |err| switch (err) {
-                error.StreamTooLong => {
-                    // NOTE: Keep headers small as restriction
-                    std.debug.print("[ERROR] 431 Request header too large: {}\n", .{err});
-                    return;
-                },
-                else => {
-                    std.debug.print("[ERROR] Failed inside headers: {}\n", .{err});
-                    return; // Hard exit
-                },
-            };
-            const header = std.mem.trimEnd(u8, header_slice, "\r\n");
+            std.log.debug("Client connected: {d}", .{conn.address.getPort()});
 
-            if (header.len > 0) {
-                var iter = std.mem.splitScalar(u8, header, ':');
+            var read_buf: [4096]u8 = undefined;
+            // var net_reader = std.net.Stream.Reader.init(connection.stream, &read_buf);
+            // const reader = &net_reader.file_reader.interface;
 
-                const key = request.allocator.dupe(u8, iter.first()) catch "";
-                const value = request.allocator.dupe(u8, iter.rest()) catch ""; // handle case where value is: "localhost:8080"
-                const trimmed_value = std.mem.trim(u8, value, " ");
-                request.headers.put(key, trimmed_value) catch |err| {
-                    std.log.err("Invalid header {}\n", .{err});
-                    return;
-                };
+            var s_reader = conn.stream.reader(&read_buf);
+            var reader = &s_reader.file_reader.interface;
 
-                if (std.ascii.eqlIgnoreCase(key, "content-length")) {
-                    content_length = std.fmt.parseInt(u16, trimmed_value, 10) catch 0;
-                }
-            }
+            var write_buf: [4096]u8 = undefined;
+            var w = conn.stream.writer(&write_buf);
+            var writer = &w.interface;
 
-            if (header.len == 0) break;
-        }
+            blk: while (true) {
+                // NOTE: request line example
+                // POST /login HTTP/1.1\r\n
 
-        if (request.isBodyRequired() and content_length == 0) {
-            try writer.writeAll("HTTP/1.1 400 Bad Request\r\n");
-            try writer.writeAll("Empty payload \r\n");
-            try writer.flush();
-            continue;
-        }
+                std.debug.print("\n[WAITING] Waiting for data...\n", .{});
 
-        if (content_length > 0) {
-            // body = reader.readAlloc(allocator, content_length) catch null;
-            std.debug.print("[debug] Reading {d} bytes of body...\n", .{content_length});
+                var request: HttpRequest = undefined;
+                try request.init(allocator);
+                defer request.deinit();
 
-            var total_read: usize = 0;
-            var body_buffer: [4096]u8 = undefined;
+                var response = try HttpResponse.init(allocator, writer);
+                defer response.deinit();
 
-            // stream body in chunks to handle large body
-            while (total_read < content_length) {
-                const remaining = content_length - total_read;
-                const to_read = @min(body_buffer.len, remaining);
-                const dest_slice = body_buffer[0..to_read];
-
-                waitReadableUntil(conn.stream, self.timeout_durations_ms) catch {
-                    response.status(StatusCode.ConnectionTimedOut);
-                    try response.send("Connection timed out");
-                    break :blk;
-                };
-
-                const bytes_read = reader.readSliceShort(dest_slice) catch |err| switch (err) {
-                    error.ReadFailed => return,
-                };
-
-                if (bytes_read == 0) {
-                    std.debug.print("[ERROR] Unexpected EOF. Expected {} more bytes.\n", .{remaining});
-                    break;
+                if (reader.seek == reader.end) {
+                    waitReadableUntil(conn.stream, self.timeout_durations_ms) catch {
+                        response.status(StatusCode.ConnectionTimedOut);
+                        try response.send("Connection timed out");
+                        break :blk;
+                    };
                 }
 
-                const chunk = dest_slice[0..bytes_read];
+                // READ REQUEST
+                const line_slice = reader.takeDelimiterInclusive('\n') catch |err| switch (err) {
+                    // Breaks the loop -> Triggers defer -> Closes socket
+                    error.EndOfStream => break,
+                    else => {
+                        std.debug.print("[ERROR] Read Error: {}\n", .{err});
+                        break;
+                    },
+                };
 
-                request.body.appendSlice(request.allocator, chunk) catch |err| {
-                    std.debug.print("[ERROR] append chunk to body: {}\n", .{err});
+                const request_line = std.mem.trimEnd(u8, line_slice, "\r\n");
+                if (request_line.len == 0) {
+                    continue;
+                }
+
+                // process request line
+                request.processRequestLine(request_line) catch |err| {
+                    std.log.err("[ERROR] process request line with error: {}\n", .{err});
                     return;
                 };
 
-                total_read += bytes_read;
-            }
-        }
-
-        for (self.routes.items) |route| {
-            if (request.method != route.method) {
-                continue;
-            }
-
-            // Returns true if it matches. Populates req.params if successful.
-            // route_pattern is defined by caller.
-            // request_path comes from reading the request
-            const is_match = Route.matchRoute(
-                route.pattern,
-                request.path,
-                &request.params,
-            ) catch false;
-
-            if (is_match) {
-                std.debug.print("[INFO] Staring route handler\n", .{});
-                // Run middlewares
-                for (self.middlewares.items) |mw| {
-                    // middleware that denies access should also send the response
-                    // (and set res.headers_sent = true via send()), then return .Stop.
-                    const result = try mw.func(
-                        mw.ctx,
-                        &route,
-                        &request,
-                        &response,
-                    );
-                    std.debug.print("[INFO] result from middleware: {any}\n", .{result});
-                    if (result == .Stop) continue :blk;
+                if (request.method == .UNKNOWN) {
+                    try writer.writeAll("HTTP/1.1 405 ERROR\r\n");
+                    try writer.writeAll("Unknown method\r\n");
+                    try writer.flush();
+                    continue;
                 }
 
-                // FOUND IT! Run the handler.
-                route.handler(self.allocator, &request, &response) catch |err| {
-                    std.log.err("Handler failed: {}", .{err});
+                var content_length: u16 = 0;
 
-                    // force a 500 response if headers weren't sent yet
-                    if (!response.headers_sent) {
-                        response.status(StatusCode.InternalServerError);
-                        try response.send("Internal Server Error");
+                // HEADERS PARSING
+                while (true) {
+                    if (reader.seek == reader.end) {
+                        waitReadableUntil(conn.stream, self.timeout_durations_ms) catch {
+                            response.status(StatusCode.ConnectionTimedOut);
+                            try response.send("Connection timed out");
+                            break :blk;
+                        };
                     }
-                };
 
-                // if nothing is sent, send something
-                if (!response.headers_sent) {
-                    try response.send("");
+                    const header_slice = reader.takeDelimiterInclusive('\n') catch |err| switch (err) {
+                        error.StreamTooLong => {
+                            // NOTE: Keep headers small as restriction
+                            std.debug.print("[ERROR] 431 Request header too large: {}\n", .{err});
+                            return;
+                        },
+                        else => {
+                            std.debug.print("[ERROR] Failed inside headers: {}\n", .{err});
+                            return; // Hard exit
+                        },
+                    };
+                    const header = std.mem.trimEnd(u8, header_slice, "\r\n");
+
+                    if (header.len > 0) {
+                        var iter = std.mem.splitScalar(u8, header, ':');
+
+                        const key = request.allocator.dupe(u8, iter.first()) catch "";
+                        const value = request.allocator.dupe(u8, iter.rest()) catch ""; // handle case where value is: "localhost:8080"
+                        const trimmed_value = std.mem.trim(u8, value, " ");
+                        request.headers.put(key, trimmed_value) catch |err| {
+                            std.log.err("Invalid header {}\n", .{err});
+                            return;
+                        };
+
+                        if (std.ascii.eqlIgnoreCase(key, "content-length")) {
+                            content_length = std.fmt.parseInt(u16, trimmed_value, 10) catch 0;
+                        }
+                    }
+
+                    if (header.len == 0) break;
                 }
 
-                std.debug.print("[LOGIC] Sending Response...\n", .{});
-                continue :blk;
+                if (request.isBodyRequired() and content_length == 0) {
+                    try writer.writeAll("HTTP/1.1 400 Bad Request\r\n");
+                    try writer.writeAll("Empty payload \r\n");
+                    try writer.flush();
+                    continue;
+                }
+
+                if (content_length > 0) {
+                    // body = reader.readAlloc(allocator, content_length) catch null;
+                    std.debug.print("[debug] Reading {d} bytes of body...\n", .{content_length});
+
+                    var total_read: usize = 0;
+                    var body_buffer: [4096]u8 = undefined;
+
+                    // stream body in chunks to handle large body
+                    while (total_read < content_length) {
+                        const remaining = content_length - total_read;
+                        const to_read = @min(body_buffer.len, remaining);
+                        const dest_slice = body_buffer[0..to_read];
+
+                        waitReadableUntil(conn.stream, self.timeout_durations_ms) catch {
+                            response.status(StatusCode.ConnectionTimedOut);
+                            try response.send("Connection timed out");
+                            break :blk;
+                        };
+
+                        const bytes_read = reader.readSliceShort(dest_slice) catch |err| switch (err) {
+                            error.ReadFailed => return,
+                        };
+
+                        if (bytes_read == 0) {
+                            std.debug.print("[ERROR] Unexpected EOF. Expected {} more bytes.\n", .{remaining});
+                            break;
+                        }
+
+                        const chunk = dest_slice[0..bytes_read];
+
+                        request.body.appendSlice(request.allocator, chunk) catch |err| {
+                            std.debug.print("[ERROR] append chunk to body: {}\n", .{err});
+                            return;
+                        };
+
+                        total_read += bytes_read;
+                    }
+                }
+
+                for (self.routes.items) |route| {
+                    if (request.method != route.method) {
+                        continue;
+                    }
+
+                    // Returns true if it matches. Populates req.params if successful.
+                    // route_pattern is defined by caller.
+                    // request_path comes from reading the request
+                    const is_match = Route.matchRoute(
+                        route.pattern,
+                        request.path,
+                        &request.params,
+                    ) catch false;
+
+                    if (is_match) {
+                        std.debug.print("[INFO] Staring route handler\n", .{});
+                        // Run middlewares
+                        for (self.middlewares.items) |mw| {
+                            // middleware that denies access should also send the response
+                            // (and set res.headers_sent = true via send()), then return .Stop.
+                            const result = try mw.func(
+                                mw.ctx,
+                                &route,
+                                &request,
+                                &response,
+                            );
+                            std.debug.print("[INFO] result from middleware: {any}\n", .{result});
+                            if (result == .Stop) continue :blk;
+                        }
+
+                        // FOUND IT! Run the handler.
+                        route.handler(self.allocator, &request, &response) catch |err| {
+                            std.log.err("Handler failed: {}", .{err});
+
+                            // force a 500 response if headers weren't sent yet
+                            if (!response.headers_sent) {
+                                response.status(StatusCode.InternalServerError);
+                                try response.send("Internal Server Error");
+                            }
+                        };
+
+                        // if nothing is sent, send something
+                        if (!response.headers_sent) {
+                            try response.send("");
+                        }
+
+                        std.debug.print("[LOGIC] Sending Response...\n", .{});
+                        continue :blk;
+                    }
+
+                    request.params.clearRetainingCapacity();
+                }
+
+                // Handle 404
+                response.status(StatusCode.NotFound);
+                try response.send("Not Found");
+            }
+        }
+        /// usage: server.get("/users/:id", handleGet);
+        pub fn get(self: *Self, path: []const u8, handler: Handler) !void {
+            try self.routes.append(self.allocator, .{
+                .method = .GET,
+                .pattern = path,
+                .handler = handler,
+            });
+        }
+
+        /// usage: server.post("/users", handlePost);
+        pub fn post(self: *Self, path: []const u8, handler: Handler) !void {
+            try self.routes.append(self.allocator, .{
+                .method = .POST,
+                .pattern = path,
+                .handler = handler,
+            });
+        }
+
+        /// usage: server.put("/users", handlePost);
+        pub fn put(self: *Self, path: []const u8, handler: Handler) !void {
+            try self.routes.append(self.allocator, .{
+                .method = .PUT,
+                .pattern = path,
+                .handler = handler,
+            });
+        }
+
+        /// usage: server.patch("/users", handlePatch);
+        pub fn patch(self: *Self, path: []const u8, handler: Handler) !void {
+            try self.routes.append(self.allocator, .{
+                .method = .PATCH,
+                .pattern = path,
+                .handler = handler,
+            });
+        }
+
+        /// usage: server.delete("/users", handleDelete);
+        pub fn delete(self: *Self, path: []const u8, handler: Handler) !void {
+            try self.routes.append(self.allocator, .{
+                .method = .DELETE,
+                .pattern = path,
+                .handler = handler,
+            });
+        }
+
+        /// Accept a middleware handler
+        /// Then append it to ArrayList(Middleware)
+        pub fn use(self: *Self, ctx: anytype, comptime mw: anytype) !void {
+            const CtxPtr = @TypeOf(ctx);
+            // Optional sanity checks:
+            comptime {
+                const info = @typeInfo(CtxPtr);
+                if (info != .pointer) @compileError("ctx must be a pointer type");
+                if (@typeInfo(@TypeOf(mw)) != .@"fn") @compileError("mw must be a function");
             }
 
-            request.params.clearRetainingCapacity();
-        }
+            const Trampoline = struct {
+                fn call(
+                    raw_ctx: *anyopaque,
+                    route: *const Route,
+                    req: *const HttpRequest,
+                    res: *HttpResponse,
+                ) anyerror!MiddlewareResult {
+                    // Correct Zig 0.15 style:
+                    // - @alignCast is needed because we're increasing alignment from *anyopaque to *T
+                    // - @ptrCast infers destination from the variable type (CtxPtr)
+                    const typed_ctx: CtxPtr = @ptrCast(@alignCast(raw_ctx));
+                    return mw(typed_ctx, route, req, res);
+                }
+            };
 
-        // Handle 404
-        response.status(StatusCode.NotFound);
-        try response.send("Not Found");
-    }
-}
-/// usage: server.get("/users/:id", handleGet);
-pub fn get(self: *Self, path: []const u8, handler: Handler) !void {
-    try self.routes.append(self.allocator, .{
-        .method = .GET,
-        .pattern = path,
-        .handler = handler,
-    });
-}
-
-/// usage: server.post("/users", handlePost);
-pub fn post(self: *Self, path: []const u8, handler: Handler) !void {
-    try self.routes.append(self.allocator, .{
-        .method = .POST,
-        .pattern = path,
-        .handler = handler,
-    });
-}
-
-/// usage: server.put("/users", handlePost);
-pub fn put(self: *Self, path: []const u8, handler: Handler) !void {
-    try self.routes.append(self.allocator, .{
-        .method = .PUT,
-        .pattern = path,
-        .handler = handler,
-    });
-}
-
-/// usage: server.patch("/users", handlePatch);
-pub fn patch(self: *Self, path: []const u8, handler: Handler) !void {
-    try self.routes.append(self.allocator, .{
-        .method = .PATCH,
-        .pattern = path,
-        .handler = handler,
-    });
-}
-
-/// usage: server.delete("/users", handleDelete);
-pub fn delete(self: *Self, path: []const u8, handler: Handler) !void {
-    try self.routes.append(self.allocator, .{
-        .method = .DELETE,
-        .pattern = path,
-        .handler = handler,
-    });
-}
-
-/// Accept a middleware handler
-/// Then append it to ArrayList(Middleware)
-pub fn use(self: *Self, ctx: anytype, comptime mw: anytype) !void {
-    const CtxPtr = @TypeOf(ctx);
-    // Optional sanity checks:
-    comptime {
-        const info = @typeInfo(CtxPtr);
-        if (info != .pointer) @compileError("ctx must be a pointer type");
-        if (@typeInfo(@TypeOf(mw)) != .@"fn") @compileError("mw must be a function");
-    }
-    const Trampoline = struct {
-        fn call(
-            raw_ctx: *anyopaque,
-            route: *const Route,
-            req: *const HttpRequest,
-            res: *HttpResponse,
-        ) anyerror!MiddlewareResult {
-            // Correct Zig 0.15 style:
-            // - @alignCast is needed because we're increasing alignment from *anyopaque to *T
-            // - @ptrCast infers destination from the variable type (CtxPtr)
-            const typed_ctx: CtxPtr = @ptrCast(@alignCast(raw_ctx));
-            return mw(typed_ctx, route, req, res);
+            try self.middlewares.append(self.allocator, .{
+                .ctx = @ptrCast(ctx), // *T -> *anyopaque (no alignment increase)
+                .func = &Trampoline.call, // function pointer compatible with Middleware
+            });
         }
     };
-    try self.middlewares.append(self.allocator, .{
-        .ctx = @ptrCast(ctx), // *T -> *anyopaque (no alignment increase)
-        .func = &Trampoline.call, // function pointer compatible with Middleware
-    });
 }
 
 pub const Route = struct {
     method: HttpMethod,
     pattern: []const u8,
-    handler: Self.Handler,
+    handler: Handler,
     auth: Auth.AuthPolicy = .public,
 
     fn matchRoute(
