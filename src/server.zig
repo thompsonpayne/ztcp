@@ -13,14 +13,15 @@ const Auth = @import("auth.zig");
 pub const MiddlewareResult = enum { Stop, Continue };
 
 pub fn Server(comptime CtxType: type) type {
-    const Handler = *const fn (
-        allocator: std.mem.Allocator,
-        req: *const HttpRequest, // const here because we don't want caller to modify the request
-        res: *HttpResponse, // WARN: do we want caller to modify the response though?
-        ctx: *CtxType,
-    ) anyerror!void;
     return struct {
         const Self = @This();
+
+        const Handler = *const fn (
+            allocator: std.mem.Allocator,
+            req: *const HttpRequest, // const here because we don't want caller to modify the request
+            res: *HttpResponse, // WARN: do we want caller to modify the response though?
+            ctx: *CtxType,
+        ) anyerror!void;
 
         pub const Route = struct {
             method: HttpMethod,
@@ -83,7 +84,7 @@ pub fn Server(comptime CtxType: type) type {
             port: ?u16 = null,
             n_threads: ?u8 = null,
             host: ?[]const u8 = null,
-            ctx: ?CtxType = null,
+            ctx: CtxType,
         };
 
         timeout_durations_ms: i32,
@@ -111,7 +112,7 @@ pub fn Server(comptime CtxType: type) type {
             self.routes = try .initCapacity(allocator, 64);
             self.timeout_durations_ms = 60_000; // 60s
             self.middlewares = try .initCapacity(allocator, 16);
-            self.ctx = options.ctx orelse undefined;
+            self.ctx = options.ctx;
 
             return self;
         }

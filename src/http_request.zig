@@ -70,6 +70,7 @@ pub fn processRequestLine(self: *HttpRequest, request_line: []const u8) !void {
 
     const p = split_iter.next() orelse "/";
     const path = try self.allocator.dupe(u8, p);
+
     errdefer self.allocator.free(path);
 
     const v = split_iter.next() orelse "HTTP/1.1";

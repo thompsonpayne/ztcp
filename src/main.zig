@@ -12,15 +12,16 @@ const ResponseBody = HttpResponse.ResponseBody;
 const PORT = 5882;
 const HOST = "127.0.0.1";
 
+const AppCtx = struct { db: *pg.Pool };
+const DServer = server_mod.Server(AppCtx);
+const Route = DServer.Route;
+
 const AuthCtx = struct {
     auth: *Auth, // contains jwt secret + refresh store + mutex
     issuer: []const u8,
     audience: []const u8,
+    ctx: *const AppCtx,
 };
-
-const AppCtx = struct { db: *pg.Pool };
-const DServer = server_mod.Server(AppCtx);
-const Route = DServer.Route;
 
 pub fn main() !void {
     var gpa = std.heap.DebugAllocator(.{}){};
@@ -48,11 +49,12 @@ pub fn main() !void {
     };
     defer db.deinit();
 
+    const app_ctx: AppCtx = .{ .db = db };
     var server = try DServer.init(allocator, .{
         .host = HOST,
         .n_threads = 4,
         .port = PORT,
-        .ctx = .{ .db = db },
+        .ctx = app_ctx,
     });
     defer server.deinit();
 
@@ -61,16 +63,17 @@ pub fn main() !void {
     var auth: Auth = undefined;
     try auth.init(allocator);
     defer auth.deinit();
-    var app_ctx = AuthCtx{
+    var auth_ctx = AuthCtx{
         .auth = &auth,
         .issuer = "zig-tcp",
         .audience = "zig-tcp-api",
+        .ctx = &app_ctx,
     };
 
-    try server.use(&app_ctx, authHandler);
+    try server.use(&auth_ctx, authHandler);
 
     // Register dynamic route
-    try server.get("/users/:id", handleGetUser);
+    try server.get("/tasks/:id", handleGetTask);
 
     // Register nested dynamic route
     try server.get("/posts/:postId/comments/:commentId", handleComment);
@@ -80,24 +83,24 @@ pub fn main() !void {
     };
 }
 
-pub fn handleGetUser(allocator: std.mem.Allocator, req: *const HttpRequest, res: *HttpResponse, ctx: *AppCtx) !void {
+pub fn handleGetTask(allocator: std.mem.Allocator, req: *const HttpRequest, res: *HttpResponse, ctx: *AppCtx) !void {
     _ = allocator;
-    _ = req;
-    _ = ctx;
+    const db = ctx.db;
+    const id = req.getParam("id");
 
     const body: ResponseBody([]const u8) = .{
         .message = "Success getting user",
         .data = "User A",
     };
 
-    // var row = try app.db.row("select name from tasks where id = $1", .{task_id}) orelse {
-    //     res.status = 404;
-    //     res.body = "Not Found";
-    //     return;
-    // };
-    // defer row.deinit() catch |err| {
-    //     std.debug.print("Error cleaning up row query: {}", .{err});
-    // };
+    var row = try db.row("select name from tasks where id = $1", .{id}) orelse {
+        res.status(.NotFound);
+        try res.send("Not Found");
+        return;
+    };
+    defer row.deinit() catch |err| {
+        std.debug.print("Error cleaning up row query: {}", .{err});
+    };
 
     res.status(utils.StatusCode.OK);
     try res.json(body);
