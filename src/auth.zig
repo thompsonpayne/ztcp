@@ -191,12 +191,9 @@ fn decodeBase64url(allocator: std.mem.Allocator, encoded: []const u8) ![]const u
 }
 
 fn encodeBase64url(allocator: std.mem.Allocator, input: []const u8) ![]const u8 {
-    const encoder = std.base64.url_safe_no_pad.Encoder;
-    const output_len = encoder.calcSize(input.len);
-
-    var buffer = try allocator.alloc(u8, output_len);
-    _ = encoder.encode(&buffer, input);
-
+    const output_len = std.base64.url_safe_no_pad.Encoder.calcSize(input.len);
+    const buffer = try allocator.alloc(u8, output_len);
+    _ = std.base64.url_safe_no_pad.Encoder.encode(buffer, input);
     return buffer;
 }
 
@@ -235,4 +232,118 @@ fn parseJwtClaims(allocator: std.mem.Allocator, claims: []const u8) !std.json.Pa
     );
 
     return parsed;
+}
+
+test "authenticate" {
+    const testing = std.testing;
+
+    var auth: Auth = undefined;
+    try auth.init(testing.allocator);
+    defer auth.deinit();
+
+    var req: HttpRequest = undefined;
+    try req.init(testing.allocator);
+    defer req.deinit();
+
+    // Test 1: No auth header, no cookie -> .none
+    const result1 = try auth.authenticate(&req);
+    try testing.expectEqual(Authn.none, result1);
+
+    // Test 2: Invalid bearer token (wrong format) -> .invalid
+    try req.headers.put("authorization", "Basic invalid");
+    const result2 = try auth.authenticate(&req);
+    try testing.expectEqual(Authn.invalid, result2);
+
+    // Test 3: Invalid bearer token (bad JWT format) -> .invalid
+    try req.headers.put("authorization", "Bearer notvalidjwt");
+    const result3 = try auth.authenticate(&req);
+    try testing.expectEqual(Authn.invalid, result3);
+
+    // Test 4: Invalid session (unknown sid) -> .invalid
+    _ = req.headers.remove("authorization");
+    try req.headers.put("cookie", "sid=unknown_sid");
+    const result4 = try auth.authenticate(&req);
+    try testing.expectEqual(Authn.invalid, result4);
+
+    // Test 5: Expired session -> .invalid
+    const now_ms = std.time.milliTimestamp();
+    try auth.sessions.put("expired_sid", .{
+        .principal = .{
+            .user_id = "user123",
+            .scheme = .session,
+            .is_admin = false,
+        },
+        .expiry_at_ms = now_ms - 1000,
+    });
+    try req.headers.put("cookie", "sid=expired_sid");
+    const result5 = try auth.authenticate(&req);
+    try testing.expectEqual(Authn.invalid, result5);
+
+    // Test 6: Valid session -> .principal
+    try auth.sessions.put("valid_sid", .{
+        .principal = .{
+            .user_id = "user456",
+            .scheme = .session,
+            .is_admin = true,
+        },
+        .expiry_at_ms = now_ms + 3600000,
+    });
+    try req.headers.put("cookie", "sid=valid_sid");
+    const result6 = try auth.authenticate(&req);
+    try testing.expect(result6 == .principal);
+    switch (result6) {
+        .principal => |p| {
+            try testing.expectEqualStrings("user456", p.user_id);
+            try testing.expectEqual(AuthScheme.session, p.scheme);
+            try testing.expect(p.is_admin);
+        },
+        else => unreachable,
+    }
+
+    // Test 7: Valid bearer token -> .principal
+    _ = req.headers.remove("cookie");
+
+    const header_json = "{\"alg\":\"HS256\",\"typ\":\"JWT\"}";
+    const exp_ms = now_ms + 3600000; // 1 hour from now
+    const payload_json = try std.fmt.allocPrint(testing.allocator, "{{\"sub\":\"user789\",\"admin\":true,\"iat\":{d},\"exp\":{d},\"iss\":\"zig-tcp\",\"aud\":\"zig-tcp-api\"}}", .{ now_ms, exp_ms });
+    defer testing.allocator.free(payload_json);
+
+    const header_b64 = try encodeBase64url(testing.allocator, header_json);
+    defer testing.allocator.free(header_b64);
+    const payload_b64 = try encodeBase64url(testing.allocator, payload_json);
+    defer testing.allocator.free(payload_b64);
+
+    var hmac = std.crypto.auth.hmac.sha2.HmacSha256.init(auth.jwt_secret);
+    hmac.update(header_b64);
+    hmac.update(".");
+    hmac.update(payload_b64);
+    var signature: [std.crypto.auth.hmac.sha2.HmacSha256.mac_length]u8 = undefined;
+    hmac.final(&signature);
+
+    var sig_buf: [64]u8 = undefined;
+    const signature_b64 = std.base64.url_safe_no_pad.Encoder.encode(&sig_buf, &signature);
+
+    const jwt_token = try std.fmt.allocPrint(testing.allocator, "{s}.{s}.{s}", .{ header_b64, payload_b64, signature_b64 });
+    defer testing.allocator.free(jwt_token);
+
+    try req.headers.put("authorization", try std.fmt.allocPrint(testing.allocator, "Bearer {s}", .{jwt_token}));
+    defer {
+        if (req.headers.get("authorization")) |val| testing.allocator.free(val);
+    }
+
+    const result7 = try auth.authenticate(&req);
+    try testing.expect(result7 == .principal);
+    switch (result7) {
+        .principal => |p| {
+            try testing.expectEqualStrings("user789", p.user_id);
+            try testing.expectEqual(AuthScheme.bearer, p.scheme);
+            try testing.expect(p.is_admin);
+        },
+        .none => {
+            return error.TestExpectedPrincipalButGotNone;
+        },
+        .invalid => {
+            return error.TestExpectedPrincipalButGotInvalid;
+        },
+    }
 }
